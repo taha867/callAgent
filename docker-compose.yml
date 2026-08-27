@@ -91,6 +91,10 @@ services:
       MIGRATION_DATABASE_URL: postgresql+asyncpg://callagent_migrator:callagent_migrator@postgres:5432/callagent
       REDIS_URL: redis://redis:6379/0
       TEMPORAL_HOST: temporal:7233
+      # The frontend dev server (Vite default port) — CORS_ORIGINS defaults to [] otherwise,
+      # which blocks every browser-side call from frontend/ even though curl/server-to-server
+      # calls succeed (the CORS preflight is rejected, not the request itself).
+      CORS_ORIGINS: '["http://localhost:5173"]'
     volumes:
       - ./backend:/app
     depends_on:
