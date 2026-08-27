@@ -1,0 +1,698 @@
+# Phase 0 — Backend Engineering Spec
+
+**Derived from:** `Insurance_Outbound_AI_Call_Center_Motor_MVP_Developer_Spec_v1_3.md` §36,
+§21, §24, §25, §32, §39, §2.2.2, §10.6.4, §13, §26, §27 · `IMPLEMENTATION_PLAN.md` §0–§2 ·
+`phases/phase-0-foundations.md` · `CLAUDE.md` §2 (backend conventions)
+
+**Purpose of this document:** `phases/phase-0-foundations.md` says *what* Phase 0 must
+produce; `CLAUDE.md` says *how* code in this repo should generally be shaped. Neither pins
+down the concrete files, schemas, and mechanisms needed to actually build Phase 0. This
+document is that missing layer — a build-ready blueprint for the backend half of Phase 0,
+file by file, so implementation can start without re-deriving design decisions mid-task.
+Frontend has no Phase 0 work (the dashboard has nothing to show until Phase 1 produces real
+call data) — this spec is backend-only by design, matching `phases/phase-0-foundations.md`'s
+own scope.
+
+Nothing in this phase dials a phone or talks to an LLM. Everything here exists to make the
+mechanisms in spec §36 **enforced by code**, not just documented, before any phase that
+could violate them has been written.
+
+---
+
+## 0. Design decisions (read this before implementing)
+
+`phases/phase-0-foundations.md` leaves five things under-specified. Resolving them now so
+later phases don't inherit ambiguity:
+
+1. **Disposition codes live in `src/calls/constants.py`; action codes live in
+   `src/actions/constants.py`** — not a standalone shared `src/constants.py`. `CLAUDE.md`
+   §2.1 already assigns disposition codes to `calls/constants.py` ("disposition codes (spec
+   §24), state names"); action codes follow the same domain-ownership rule ("a lookup/config
+   entity belongs in the domain that primarily consumes it") since `ClaimAction.action_code`
+   is `actions/`'s own column. `audit.AuditEvent` does **not** import either enum — see
+   decision 3.
+
+2. **`audit.AuditEvent`'s `decision`/`reason_code`/`policy_rule`/`action_taken` fields are
+   free-text (length-bounded, pattern-validated) strings, not FKs to `DispositionCode`/
+   `ActionCode`.** Spec §32's own examples (`"AUTHENTICATION_FAILED"`,
+   `"CALL_TERMINATED_WITH_OFFICIAL_SUPPORT_OPTION"`) aren't drawn from the §24/§25 lists —
+   they're a separate, per-decision explanation vocabulary that grows organically per
+   domain. Making `audit/` import `calls/constants.py` and `actions/constants.py` would also
+   invert `audit/`'s one-way dependency rule (§2.1: "every other domain imports *into*
+   `audit/`; it never imports back"). Where a `CallAttempt.disposition_code` or
+   `ClaimAction.action_code` value is *also* written to an `AuditEvent.action_taken` field,
+   the enum validation already happened on the owning domain's own column — `audit/` just
+   stores the resulting string.
+
+3. **`worker.py` registers zero domain workflows, exactly as the task says — the
+   end-to-end proof required by the exit criteria runs its own in-test worker, not
+   `worker.py`.** The task list and exit criteria read as if in tension ("stub ... with zero
+   registered workflows" vs. "an empty-but-typed workflow can be triggered end-to-end"), but
+   they resolve cleanly: `worker.py`'s job in Phase 0 is only to prove the process boots and
+   connects to Temporal OSS — Phase 1 is what gives it real workflows to register. The
+   end-to-end proof (§4 below) spins up its own ephemeral Temporal test worker inside
+   `tests/integration/test_phase0_e2e.py`, registering a test-only workflow that never ships
+   in `worker.py`. This is the standard Temporal testing pattern (`WorkflowEnvironment`) and
+   keeps "zero registered workflows" literally true for the shipped process.
+
+4. **`calls/` gets its skeleton (`constants.py`, a stub `workflows.py`, a stub
+   `activities.py`) in Phase 0, but not `models.py`.** `CallSession`/`CallAttempt` modeling
+   is explicitly Phase 1's deliverable ("Deterministic Core" — the Master Call State
+   Machine). Building that table now would pre-empt Phase 1 design decisions this phase
+   isn't scoped to make. `audit.AuditEvent.call_id` is therefore a plain indexed string
+   column in Phase 0, documented to become a real FK once `calls.CallSession` exists.
+
+5. **Disposition/action codes are enforced two ways, not one**: a SQLAlchemy
+   `Enum(..., validate_strings=True, native_enum=False)` column type (runtime rejection of
+   any value outside the closed set) *and* a static CI script that greps for hardcoded
+   string literals assigned to a `disposition_code`/`action_code` column anywhere in `src/`
+   and flags any that don't match an enum member (catches a typo before it ever reaches a
+   test). `native_enum=False` (plain `VARCHAR` + `CHECK` constraint, not a Postgres native
+   `ENUM` type) is deliberate: spec §24/§25 lists will grow across phases, and altering a
+   Postgres native enum type is a locking, multi-step migration — a `CHECK` constraint is a
+   single-column `ALTER TABLE` regenerated by Alembic autogenerate.
+
+---
+
+## 1. Repo & environment scaffolding
+
+```
+CallAgent/
+├── docker-compose.yml
+├── backend/
+│   ├── migrations/
+│   │   ├── versions/
+│   │   ├── env.py
+│   │   └── script.py.mako
+│   ├── src/
+│   │   ├── audit/
+│   │   │   ├── __init__.py
+│   │   │   ├── models.py          # AuditEvent
+│   │   │   ├── schemas.py         # AuditEventCreate / AuditEventRead
+│   │   │   └── service.py         # record_event() — the only write path, no update/delete fns
+│   │   ├── calls/
+│   │   │   ├── __init__.py
+│   │   │   ├── constants.py       # DispositionCode enum, CallState placeholder enum
+│   │   │   ├── workflows.py       # CallSessionWorkflow — stub, spec'd but not implemented
+│   │   │   └── activities.py      # record_audit_event activity used by the smoke test
+│   │   ├── actions/
+│   │   │   ├── __init__.py
+│   │   │   └── constants.py       # ActionCode enum
+│   │   ├── customers/
+│   │   │   ├── __init__.py
+│   │   │   └── models.py          # Customer (minimal — enough for claims/ FKs + seed data)
+│   │   ├── claims/
+│   │   │   ├── __init__.py
+│   │   │   └── models.py          # MotorPolicy, MotorClaim, ClaimStatusEvent, ClaimDocument,
+│   │   │                          #   ClaimParty, RepairGarage
+│   │   ├── voice/
+│   │   │   ├── __init__.py
+│   │   │   └── tools.py           # TOOL_REGISTRY allow-list — empty/stub tool schemas
+│   │   ├── middlewares/
+│   │   │   ├── __init__.py
+│   │   │   ├── cors.py
+│   │   │   ├── request_context.py
+│   │   │   └── logging.py
+│   │   ├── config.py              # Config(BaseSettings) — DB/Redis/Temporal URLs, kill switches
+│   │   ├── models.py              # shared DeclarativeBase + naming convention
+│   │   ├── exceptions.py          # shared exception base classes
+│   │   ├── database.py            # async engine, async_sessionmaker, get_db()
+│   │   ├── idempotency.py         # IdempotencyRecord model + idempotent() helper
+│   │   ├── kill_switch.py         # assert_outbound_enabled() + require_outbound_enabled dep
+│   │   └── main.py                # FastAPI() + one health-check route
+│   ├── scripts/
+│   │   ├── seed_demo_data.py      # synthetic dataset generator (idempotent, fixed seed)
+│   │   └── ci/
+│   │       ├── check_tool_allowlist.py
+│   │       └── check_disposition_action_codes.py
+│   ├── tests/
+│   │   ├── conftest.py            # async db session fixture, temporal test env fixture
+│   │   ├── unit/
+│   │   │   ├── test_audit_insert_only.py
+│   │   │   ├── test_disposition_action_enums.py
+│   │   │   ├── test_kill_switch.py
+│   │   │   ├── test_idempotency.py
+│   │   │   └── test_tool_allowlist_mechanism.py
+│   │   └── integration/
+│   │       ├── test_phase0_e2e.py         # fake call -> disposition -> AuditEvent row
+│   │       └── test_docker_compose_boot.py # optional: healthcheck smoke test
+│   ├── worker.py                  # Temporal worker, zero registered workflows (decision 3)
+│   ├── requirements/
+│   │   ├── base.txt
+│   │   ├── dev.txt
+│   │   └── prod.txt
+│   ├── alembic.ini
+│   ├── logging.ini
+│   └── .env.example
+└── .github/workflows/backend-ci.yml
+```
+
+No `frontend/` work in Phase 0 (see Purpose note above) — its scaffold is created empty
+(`npm create vite`, folder skeleton per `CLAUDE.md` §3.2–3.3) only if the user wants the repo
+shape to exist ahead of Phase 1; it does no work and has no exit criteria here.
+
+### 1.1 `docker-compose.yml`
+
+Four services, all free/self-hosted per `IMPLEMENTATION_PLAN.md` §1:
+
+```yaml
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: callagent
+      POSTGRES_USER: callagent
+      POSTGRES_PASSWORD: callagent
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U callagent"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  temporal:
+    image: temporalio/auto-setup:1.24
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: callagent
+      POSTGRES_PWD: callagent
+      POSTGRES_SEEDS: postgres
+    ports: ["7233:7233"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  temporal-ui:
+    image: temporalio/ui:2.31
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    ports: ["8080:8080"]
+    depends_on: [temporal]
+
+  backend:
+    build: ./backend
+    env_file: ./backend/.env
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+      temporal: { condition: service_started }
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  pgdata:
+```
+
+`temporal-ui` isn't strictly required by the exit criteria but costs nothing and is worth
+having from day one — every later phase's workflows are far easier to debug with the UI
+already wired than added under deadline pressure.
+
+### 1.2 `requirements/base.txt` (Phase 0 subset — full list grows per phase)
+
+```
+fastapi
+uvicorn[standard]
+sqlalchemy[asyncio]>=2.0
+asyncpg
+alembic
+pydantic>=2
+pydantic-settings
+temporalio
+redis
+```
+
+`dev.txt` adds `pytest`, `pytest-asyncio`, `httpx`, `ruff`, `mypy`, `testcontainers[postgres]`
+(or plain docker-compose-in-CI, see §6) and imports `base.txt`. `prod.txt` imports `base.txt`
+only. `pipecat-ai` and `presidio-*` are not needed until Phase 2/5 — omit them now rather than
+installing unused weight.
+
+---
+
+## 2. Shared foundation modules
+
+### 2.1 `src/models.py` — declarative base
+
+Exactly the naming-convention `Base` from `CLAUDE.md` §2.1 — every domain's `models.py`
+imports this, none defines its own `DeclarativeBase`.
+
+### 2.2 `src/database.py`
+
+Async engine + `async_sessionmaker` + `get_db()` dependency, per `CLAUDE.md` §2.5. One
+addition for Phase 0: a `get_session_factory()` accessor separate from the `Depends()` form,
+because `worker.py`'s Temporal activities and `scripts/seed_demo_data.py` need a session
+without going through FastAPI's dependency injection.
+
+### 2.3 `src/config.py`
+
+```python
+from pydantic import PostgresDsn, RedisDsn
+from pydantic_settings import BaseSettings
+
+class Config(BaseSettings):
+    DATABASE_URL: PostgresDsn
+    REDIS_URL: RedisDsn
+    ENVIRONMENT: str = "development"
+    CORS_ORIGINS: list[str] = []
+    TEMPORAL_HOST: str = "localhost:7233"
+    TEMPORAL_NAMESPACE: str = "default"
+    TEMPORAL_TASK_QUEUE: str = "callagent-main"
+
+    # Kill switch — spec §39
+    GLOBAL_OUTBOUND_ENABLED: bool = True
+    CAMPAIGN_ENABLED: bool = True
+    CLI_ENABLED: bool = True
+    AI_AUTOMATION_ENABLED: bool = True
+    HUMAN_FALLBACK_AVAILABLE: bool = True
+
+settings = Config()
+```
+
+A missing `DATABASE_URL`/`TEMPORAL_HOST` fails at import time (Pydantic raises on missing
+required field), satisfying "fail immediately on boot" from `CLAUDE.md` §2.8.
+
+### 2.4 `src/kill_switch.py`
+
+Two entry points sharing one rule, because the kill switch must be checkable from both a
+FastAPI route (Phase 1+ campaign/telephony endpoints) and a Temporal activity (which never
+sees a `Request`):
+
+```python
+from typing import Literal
+from fastapi import HTTPException, status
+from src.config import settings
+from src.exceptions import OutboundDisabledError
+
+OutboundGate = Literal["campaign", "cli", "ai_automation"]
+
+_GATE_FLAGS: dict[OutboundGate, str] = {
+    "campaign": "CAMPAIGN_ENABLED",
+    "cli": "CLI_ENABLED",
+    "ai_automation": "AI_AUTOMATION_ENABLED",
+}
+
+def assert_outbound_enabled(*gates: OutboundGate) -> None:
+    if not settings.GLOBAL_OUTBOUND_ENABLED:
+        raise OutboundDisabledError("GLOBAL_OUTBOUND_ENABLED")
+    for gate in gates:
+        flag_name = _GATE_FLAGS[gate]
+        if not getattr(settings, flag_name):
+            raise OutboundDisabledError(flag_name)
+
+async def require_outbound_enabled(*gates: OutboundGate):
+    def _dependency():
+        try:
+            assert_outbound_enabled(*gates)
+        except OutboundDisabledError as exc:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    return _dependency
+```
+
+`assert_outbound_enabled()` is the one rule; the FastAPI dependency and any Temporal
+activity (`campaigns/activities.py` in Phase 1) both call *it*, never re-implement the flag
+check. Phase 0 only needs the mechanism to exist and be unit-tested — nothing calls it yet
+since nothing dials.
+
+### 2.5 `src/idempotency.py`
+
+```python
+class IdempotencyRecord(Base):
+    __tablename__ = "idempotency_record"
+    idempotency_key: Mapped[str] = mapped_column(primary_key=True)
+    correlation_id: Mapped[str] = mapped_column(index=True)
+    operation_name: Mapped[str]
+    request_fingerprint: Mapped[str]   # hash of the normalized request payload
+    status: Mapped[str] = mapped_column(default="PENDING")  # PENDING | COMPLETED | FAILED
+    response_body: Mapped[dict | None] = mapped_column(JSONB, default=None)
+    created_at: Mapped[datetime] = mapped_column(default=func.now())
+    completed_at: Mapped[datetime | None]
+```
+
+`idempotency_key` as the primary key (not a separate unique constraint) means a race between
+two retries of the same key hits a Postgres primary-key conflict — the second writer gets an
+`IntegrityError`, catches it, and polls for the first writer's `COMPLETED` row instead of
+proceeding. `request_fingerprint` guards the "same key, different payload" bug case (a caller
+reusing a key for a different logical request) — the wrapper raises rather than silently
+returning a mismatched cached result.
+
+`src/idempotency.py` also exports the wrapper every Phase-1+ service function reachable from
+the live-call path will use:
+
+```python
+async def idempotent(
+    session: AsyncSession,
+    *,
+    key: str,
+    correlation_id: str,
+    operation_name: str,
+    payload: dict,
+    operation: Callable[[], Awaitable[dict]],
+) -> dict: ...
+```
+
+Phase 0 ships the model, the migration, and this function with full unit-test coverage
+(first call runs `operation()` and persists it; replay of the same key+payload returns the
+stored result without re-running `operation()`; same key+different payload raises). No
+domain calls it yet — `actions/`, `complaints/`, `verification/`, `privacy/` don't exist
+until later phases.
+
+### 2.6 `src/audit/models.py` — the insert-only sink
+
+```python
+class AuditEvent(Base):
+    __tablename__ = "audit_event"
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid4()))
+    call_id: Mapped[str | None] = mapped_column(index=True)   # becomes a real FK in Phase 1
+    correlation_id: Mapped[str | None] = mapped_column(index=True)
+    actor: Mapped[str]              # "SYSTEM" | "AI" | "HUMAN"
+    decision: Mapped[str] = mapped_column(String(120))
+    reason_code: Mapped[str] = mapped_column(String(120))
+    policy_rule: Mapped[str | None] = mapped_column(String(120))
+    action_taken: Mapped[str | None] = mapped_column(String(120))
+    metadata_json: Mapped[dict | None] = mapped_column(JSONB, default=None)
+    created_at: Mapped[datetime] = mapped_column(default=func.now())
+```
+
+Insert-only is enforced two ways, per `CLAUDE.md` §2.5 ("a service function that calls
+`session.delete()` or mutates a row on one of these models is a bug"):
+
+- **Application layer**: `src/audit/service.py` defines `record_event(...)` and nothing
+  else — no `update_event`/`delete_event` function exists to call.
+- **ORM layer (backstop against a future mistake, not the primary control)**: a SQLAlchemy
+  `before_update`/`before_delete` event listener on `AuditEvent` that raises
+  `AuditEventImmutableError` unconditionally.
+- **Database layer (the real backstop against anything bypassing the ORM — a raw SQL script,
+  a future admin tool)**: an Alembic migration `REVOKE UPDATE, DELETE ON audit_event FROM
+  callagent_app;` against the application's runtime DB role, with a separate migration-only
+  role that owns the schema. This is what makes "insert-only" a property of the table, not a
+  convention every future developer has to remember.
+
+`src/audit/service.py`:
+
+```python
+async def record_event(
+    session: AsyncSession,
+    *,
+    decision: str,
+    reason_code: str,
+    policy_rule: str | None = None,
+    action_taken: str | None = None,
+    call_id: str | None = None,
+    correlation_id: str | None = None,
+    actor: Literal["SYSTEM", "AI", "HUMAN"] = "SYSTEM",
+    metadata: dict | None = None,
+) -> AuditEvent: ...
+```
+
+This is the function every later phase's domain services call to log a decision — Phase 0's
+job is that this function, the table, and the immutability guarantee exist before any real
+decision logic does.
+
+---
+
+## 3. Rule corpus — making spec §36/§21 machine-checkable
+
+### 3.1 `src/voice/tools.py` — the LLM tool allow-list (spec §2.2.2 rule 3, §21)
+
+```python
+from pydantic import BaseModel
+
+class ToolSpec(BaseModel):
+    name: str
+    description: str
+    args_schema: type[BaseModel]
+    permission: Literal["allowed", "not_allowed_mvp", "never_allowed"]
+
+class GetClaimStatusArgs(BaseModel):
+    claim_id: str
+    verification_level: Literal["L0", "L1", "L2"]
+
+# ... one stub Args model per §21 "Allowed" capability ...
+
+TOOL_REGISTRY: dict[str, ToolSpec] = {
+    "get_claim_status": ToolSpec(
+        name="get_claim_status",
+        description="Read the approved claim status for a verified customer.",
+        args_schema=GetClaimStatusArgs,
+        permission="allowed",
+    ),
+    # create_action, schedule_callback, request_verification, register_complaint,
+    # warm_transfer, send_secure_link, list_missing_documents, explain_next_step, ...
+}
+```
+
+Every entry corresponds 1:1 to an "Allowed" row in spec §21's AI Authority Matrix. The
+"Not allowed"/"Never allowed" rows (change bank account, approve repair, override
+authentication, ...) are deliberately **absent** from `TOOL_REGISTRY` — there is no schema
+for the LLM to call because the function doesn't exist, which is the actual enforcement
+mechanism, not a comment saying "don't implement this."
+
+Tool implementations stay stubs in Phase 0 (`raise NotImplementedError`) — Phase 2 wires
+them to real services. What Phase 0 delivers is the registry shape and the gate below.
+
+### 3.2 CI gate — `scripts/ci/check_tool_allowlist.py`
+
+An AST-based static check (Python's `ast` module, not regex) that:
+
+1. Parses every `.py` file under `backend/src/`.
+2. Finds every call site matching the pattern `dispatch_tool_call(name=..., ...)` or any
+   function decorated `@llm_tool` (the dispatch convention `voice/pipeline.py` will use from
+   Phase 2 onward).
+3. Asserts the literal tool name at each call site is a key in `TOOL_REGISTRY`.
+4. Exits non-zero — failing CI — on any call site using a name outside the registry, or any
+   `@llm_tool`-decorated function not also registered.
+
+Phase 0 has no real call sites yet (nothing calls tools), so this script's Phase 0 job is
+narrower but still real: it runs against `voice/tools.py` itself and a fixture file under
+`tests/fixtures/` containing one intentionally-unregistered fake tool call, asserting the
+checker catches it. This proves the *mechanism* works before there's production code for it
+to protect — exactly what the phase's Goal section asks for.
+
+### 3.3 Test — system prompt never built from raw caller text (spec §2.2.2 rule 2)
+
+Two complementary checks, since this rule can be violated either by a bad function signature
+or a one-off f-string years from now:
+
+- **Structural**: `src/voice/prompt.py` (stub in Phase 0) declares
+  `build_system_prompt(context: PromptContext) -> str`, where `PromptContext` is a Pydantic
+  model of *structured, pre-validated* fields (claim facts already selected by the workflow,
+  per `CLAUDE.md`'s Shape B diagram) — there is no `str` parameter for raw transcript text
+  anywhere in the function's signature, so a caller literally cannot pass raw speech into it.
+- **CI gate** — `scripts/ci/check_no_raw_prompt_concat.py` (or folded into
+  `check_tool_allowlist.py`'s script as a second check): greps `src/voice/**/*.py` for any
+  f-string/`.format()`/`+` string-concatenation whose expression touches a variable named
+  like `transcript`, `caller_text`, `user_input`, or `utterance` *and* whose containing
+  function name matches `*system_prompt*`/`*developer_prompt*`. This is a narrower, higher-
+  signal net than a general string-concat linter — it targets exactly the failure pattern
+  spec §2.2.2 rule 2 describes.
+
+Both checks ship in Phase 0 against the stub; they start protecting real code the moment
+Phase 2 writes `voice/pipeline.py`.
+
+### 3.4 Disposition/action code enforcement (spec §24/§25)
+
+`src/calls/constants.py`:
+
+```python
+class DispositionCode(str, Enum):
+    SUCCESS_STATUS_DELIVERED = "SUCCESS_STATUS_DELIVERED"
+    SUCCESS_STATUS_AND_QUERY_RESOLVED = "SUCCESS_STATUS_AND_QUERY_RESOLVED"
+    # ... all 46 codes from spec §24, verbatim ...
+    COMPLAINT_SLA_BREACHED = "COMPLAINT_SLA_BREACHED"
+```
+
+`src/actions/constants.py` mirrors this for the 21 codes in spec §25 as `ActionCode`. Both
+are plain `str, Enum` subclasses (not `IntEnum` — the wire/DB value must be the readable
+code, not an ordinal) so they serialize directly through Pydantic and compare equal to
+plain strings in tests.
+
+Enforcement, per decision 5 above:
+
+- Any SQLAlchemy column typed against these (`calls.CallAttempt.disposition_code` in Phase 1,
+  `actions.ClaimAction.action_code` in Phase 3) uses
+  `mapped_column(Enum(DispositionCode, validate_strings=True, native_enum=False))` —
+  runtime-rejects any value outside the set, both from the ORM and via the generated
+  `CHECK` constraint for anything that writes raw SQL.
+- `scripts/ci/check_disposition_action_codes.py` statically scans `src/**/*.py` for string
+  literals assigned to any attribute/parameter literally named `disposition_code` or
+  `action_code`, and fails the build if the literal isn't a member of the corresponding
+  enum. Phase 0 has no real assignment sites, so — same pattern as §3.2 — the script is
+  proven against a `tests/fixtures/` file with one intentionally-invalid code, plus a unit
+  test asserting `DispositionCode("NOT_A_REAL_CODE")` raises `ValueError`.
+
+---
+
+## 4. Synthetic dataset & the end-to-end proof
+
+### 4.1 Minimal models needed now
+
+`customers/models.py`: `Customer` — id, full_name, phone_e164, preferred_language,
+national_id_last4 (for demo auth flavor only), created_at. Nothing else from `CLAUDE.md`'s
+full `customers/` slice (no `CustomerContactPreference`/`CustomerAuthFactor`/
+`CommunicationSuppression` yet — those are Phase 1/5 concerns).
+
+`claims/models.py`: `MotorPolicy`, `MotorClaim` (with a `claim_stage` column typed against a
+`ClaimStage` enum enumerating all 18 statuses from spec §13), `ClaimStatusEvent`,
+`ClaimDocument`, `ClaimParty`, `RepairGarage` — matching `CLAUDE.md` §2.1's `claims/`
+description. Full field sets per spec §12's `Structured Claim Status Object` shape
+(`claim_stage`, `current_owner`, `status_timestamp`, `next_expected_event`, `expected_by`,
+`customer_action_required`, `customer_action_code`, `delay_flag`,
+`approved_customer_message_key`, `language`).
+
+### 4.2 `scripts/seed_demo_data.py`
+
+Idempotent (safe to re-run against a non-empty DB — upserts by a fixed synthetic ID scheme,
+`CUST-DEMO-001`.. / `CLM-DEMO-001`..), seeded with a fixed `random.seed()` for reproducible
+fixtures across every later phase's tests. Generates:
+
+- ~10–15 customers with varied `preferred_language` (`en`/`ar`) and phone numbers.
+- At least one `MotorClaim` per `claim_stage` value across all 18 statuses in spec §13
+  (Journeys A–F plus the three exception statuses), so any later phase's test can pick a
+  claim already sitting in the exact status it needs without hand-crafting fixtures.
+- A handful of `RepairGarage`/`ClaimDocument`/`ClaimStatusEvent` rows attached to a subset of
+  claims, enough to exercise `claims/`'s relationship loading once Phase 1 needs it.
+
+Run via `python -m scripts.seed_demo_data` after `alembic upgrade head`; also invoked by
+`docker-compose`'s backend service entrypoint in dev mode (not in `prod.txt`-based images).
+
+### 4.3 End-to-end proof — `tests/integration/test_phase0_e2e.py`
+
+Per decision 3, this test owns its own Temporal test worker rather than reusing `worker.py`:
+
+```python
+async def test_fake_call_produces_disposition_and_audit_row(db_session, temporal_env):
+    worker = Worker(
+        temporal_env.client,
+        task_queue="phase0-smoke",
+        workflows=[Phase0SmokeWorkflow],
+        activities=[record_audit_event_activity],
+    )
+    async with worker:
+        result = await temporal_env.client.execute_workflow(
+            Phase0SmokeWorkflow.run,
+            {"customer_id": "CUST-DEMO-001", "claim_id": "CLM-DEMO-001"},
+            id="phase0-smoke-1",
+            task_queue="phase0-smoke",
+        )
+    assert result["disposition_code"] == DispositionCode.SUCCESS_STATUS_DELIVERED
+
+    row = await db_session.execute(
+        select(AuditEvent).where(AuditEvent.correlation_id == "phase0-smoke-1")
+    )
+    event = row.scalar_one()
+    assert event.decision == "STATUS_DELIVERED"
+    assert event.action_taken == DispositionCode.SUCCESS_STATUS_DELIVERED.value
+```
+
+`Phase0SmokeWorkflow` (defined in the test module or `tests/fixtures/`, not in `src/calls/`)
+is intentionally trivial: receive the fake call payload, pick a fixed disposition, execute
+`record_audit_event_activity` (which calls `audit.service.record_event()` through
+`database.get_session_factory()`), return. This is the "empty-but-typed workflow" the exit
+criteria names — typed because its input/output are Pydantic models, empty because it
+contains no real call-handling logic. It proves the full chain (Temporal worker boots →
+workflow runs → activity executes → DB write commits → row is queryable) before Phase 1 has
+to build that chain under the weight of real state-machine logic too.
+
+---
+
+## 5. `worker.py` and `main.py`
+
+`worker.py`:
+
+```python
+import asyncio
+from temporalio.client import Client
+from temporalio.worker import Worker
+from src.config import settings
+
+async def main():
+    client = await Client.connect(settings.TEMPORAL_HOST, namespace=settings.TEMPORAL_NAMESPACE)
+    worker = Worker(
+        client,
+        task_queue=settings.TEMPORAL_TASK_QUEUE,
+        workflows=[],     # Phase 1 adds CallSessionWorkflow here
+        activities=[],    # Phase 1 adds calls/activities.py functions here
+    )
+    await worker.run()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Running `python worker.py` against a live `docker-compose`-started Temporal must not crash —
+that's the entire Phase 0 bar for this file. `tests/integration/test_docker_compose_boot.py`
+(optional but cheap) starts the compose stack and asserts the worker process stays alive for
+a few seconds and the client connects, catching a config/connectivity regression before it
+reaches Phase 1.
+
+`main.py`: `FastAPI()` + `register_middlewares(app)` + one route:
+
+```python
+@app.get("/health", response_model=HealthRead)
+async def health(db: AsyncSession = Depends(get_db)):
+    await db.execute(text("SELECT 1"))
+    return HealthRead(status="ok")
+```
+
+No domain routers are included yet — nothing in Phase 0 has a dashboard-facing API surface.
+
+---
+
+## 6. CI (`.github/workflows/backend-ci.yml`)
+
+Runs on every PR touching `backend/`:
+
+1. **Setup**: Postgres + Redis + Temporal as GitHub Actions services (matching
+   `docker-compose.yml`'s images) — no external dependency, matches `IMPLEMENTATION_PLAN.md`
+   §1's $0 posture.
+2. **Lint**: `ruff check backend/src backend/tests backend/scripts`.
+3. **Migration check**: `alembic upgrade head` from an empty database — catches a migration
+   that doesn't apply cleanly before it reaches anyone's machine.
+4. **Rule-corpus gates** (the two scripts from §3.2/§3.4, run as explicit steps so a failure
+   is attributable in the Actions UI rather than buried in a pytest summary):
+   - `python scripts/ci/check_tool_allowlist.py`
+   - `python scripts/ci/check_disposition_action_codes.py`
+5. **Tests**: `pytest backend/tests -v` (unit + integration, including §4.3's end-to-end
+   proof).
+6. **Compose smoke test**: `docker compose up -d --wait` then `curl -f localhost:8000/health`,
+   then `docker compose down -v` — the literal exit-criteria check ("docker-compose up ...
+   with zero manual steps") run on every PR, not just locally before a demo.
+
+A PR that adds a tool call outside `TOOL_REGISTRY`, or a disposition/action code outside its
+enum, fails at step 4 — before tests even run. That ordering is deliberate: the governance
+gates are cheaper and more specific than the full test suite, so they should be the first
+thing a contributor sees fail.
+
+---
+
+## 7. Exit criteria traceability
+
+| Exit criterion (`phases/phase-0-foundations.md`) | Satisfied by |
+|---|---|
+| Empty-but-typed workflow triggers end-to-end: fake call → fake disposition → `AuditEvent` row → visible via raw DB query | §4.3 `test_phase0_e2e.py`; row queryable via `psql` against the compose Postgres |
+| CI gates fail the build on any ungoverned tool call | §3.2 `check_tool_allowlist.py`, wired into CI §6 step 4 |
+| CI gates fail the build on a disposition/action code outside the shared enum | §3.4 `check_disposition_action_codes.py`, CI §6 step 4 |
+| `docker-compose up` brings up Postgres, Redis, Temporal OSS, and an empty FastAPI app with one health-check route, zero manual steps | §1.1 `docker-compose.yml`; §6 step 6 compose smoke test |
+
+---
+
+## 8. Explicitly deferred to later phases
+
+Keeping Phase 0 scoped to governance/mechanism, not features — everything below is a
+different phase's job, not an oversight here:
+
+- `calls.CallSession`/`CallAttempt` models, the real Master Call State Machine, retry
+  scheduling → Phase 1.
+- Real tool implementations behind `voice/tools.py`'s registry, the STT/LLM/TTS pipeline →
+  Phase 2.
+- Dashboard-facing routers/services for any domain (`claims/`, `calls/`, `complaints/`, ...)
+  → Phase 1 onward, per the domain's own phase.
+- `verification/`, `actions/`'s real service logic, `privacy/`, `risk/` → Phases 1, 3, 5.
+- Frontend application code → begins once Phase 1 produces real data worth displaying.
+- Native Postgres row-level security / DB role separation beyond the one `REVOKE` in §2.6 →
+  Phase 5 (Security, Privacy & Compliance Hardening) is the right place for a full DB
+  permissions audit; Phase 0 only needs `audit_event` provably insert-only.
