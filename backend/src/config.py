@@ -26,6 +26,10 @@ class Config(BaseSettings):
     TEMPORAL_NAMESPACE: str = "default"
     TEMPORAL_TASK_QUEUE: str = "callagent-main"
 
+    # spec §2.2.1's recommended configuration — calls/activities.py::with_runtime_recovery
+    # uses this as the soft-wait threshold before treating a dependency call as unavailable.
+    BACKEND_SOFT_WAIT_MS: int = 1500
+
     # Idempotency wrapper tuning — src/idempotency.py
     IDEMPOTENCY_POLL_ATTEMPTS: int = 15
     IDEMPOTENCY_POLL_INTERVAL_SECONDS: float = 0.2

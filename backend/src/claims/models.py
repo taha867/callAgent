@@ -1,46 +1,24 @@
 """MotorPolicy, MotorClaim, ClaimStatusEvent, ClaimDocument, ClaimParty, RepairGarage — the
 Authoritative Data Layer (spec §2.3) for the MVP's synthetic demo claims.
 
-`ClaimStage` uses `Enum(..., validate_strings=True, native_enum=False)` — VARCHAR + CHECK,
-not a native Postgres enum type — per .claude/specs/phase-0-backend-spec.md decision 5:
-growing spec §13's status catalogue later is a one-line ALTER TABLE, not a locking
-ALTER TYPE. This is the Phase-0 proving ground for the pattern Phase 1's
-CallAttempt.disposition_code and Phase 3's ClaimAction.action_code reuse.
+`ClaimStage` (imported from claims/constants.py — see that module's docstring for why it
+doesn't live here) is typed via `Enum(..., validate_strings=True, native_enum=False)` —
+VARCHAR + CHECK, not a native Postgres enum type — per
+.claude/specs/phase-0-backend-spec.md decision 5: growing spec §13's status catalogue later
+is a one-line ALTER TABLE, not a locking ALTER TYPE. This is the Phase-0 proving ground for
+the pattern Phase 1's CallAttempt.disposition_code and Phase 3's ClaimAction.action_code
+reuse.
 """
 
 from datetime import datetime
 from decimal import Decimal
-from enum import StrEnum
 
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy import ForeignKey, Numeric, func
 from sqlalchemy.orm import Mapped, mapped_column
 
+from src.claims.constants import ClaimStage
 from src.models import Base
-
-
-class ClaimStage(StrEnum):
-    """All 18 statuses from spec §13, in journey order (A: registration, B: assessment,
-    C: approval, D: repair, E: financial, F: closure, plus the 3 exception statuses)."""
-
-    CLAIM_REGISTERED = "CLAIM_REGISTERED"
-    DOCUMENTS_PENDING = "DOCUMENTS_PENDING"
-    DOCUMENTS_RECEIVED = "DOCUMENTS_RECEIVED"
-    SURVEYOR_ASSIGNED = "SURVEYOR_ASSIGNED"
-    INSPECTION_SCHEDULED = "INSPECTION_SCHEDULED"
-    ASSESSMENT_COMPLETED = "ASSESSMENT_COMPLETED"
-    REPAIR_APPROVAL_PENDING = "REPAIR_APPROVAL_PENDING"
-    REPAIR_AUTHORIZED = "REPAIR_AUTHORIZED"
-    VEHICLE_RECEIVED_AT_GARAGE = "VEHICLE_RECEIVED_AT_GARAGE"
-    REPAIR_IN_PROGRESS = "REPAIR_IN_PROGRESS"
-    ADDITIONAL_APPROVAL_REQUIRED = "ADDITIONAL_APPROVAL_REQUIRED"
-    REPAIR_COMPLETED = "REPAIR_COMPLETED"
-    SETTLEMENT_APPROVED = "SETTLEMENT_APPROVED"
-    PAYMENT_INITIATED = "PAYMENT_INITIATED"
-    CLAIM_CLOSED = "CLAIM_CLOSED"
-    CLAIM_DELAYED = "CLAIM_DELAYED"
-    CLAIM_DECLINED = "CLAIM_DECLINED"
-    ADDITIONAL_INFORMATION_REQUIRED = "ADDITIONAL_INFORMATION_REQUIRED"
 
 
 class RepairGarage(Base):

@@ -8,7 +8,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError, StatementError
 
 from src.actions.constants import ActionCode
 from src.calls.constants import DispositionCode
-from src.claims.models import ClaimStage
+from src.claims.constants import ClaimStage
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
 _FIXTURES_DIR = _BACKEND_DIR / "tests" / "fixtures"
@@ -141,3 +141,94 @@ def test_cli_exits_zero_against_src():
         capture_output=True,
     )
     assert result.returncode == 0, result.stdout.decode() + result.stderr.decode()
+
+
+async def _seed_customer_policy_claim(db_session, *, suffix: str) -> None:
+    from src.claims.constants import ClaimStage
+    from src.claims.models import MotorClaim, MotorPolicy
+    from src.customers.models import Customer
+
+    db_session.add(Customer(id=f"CUST-ENUM-{suffix}", full_name="x", phone_e164="+1"))
+    await db_session.flush()
+    db_session.add(
+        MotorPolicy(
+            id=f"POL-ENUM-{suffix}",
+            customer_id=f"CUST-ENUM-{suffix}",
+            policy_number="P1",
+            vehicle_plate="X",
+            vehicle_make_model="Y",
+        )
+    )
+    await db_session.flush()
+    db_session.add(
+        MotorClaim(
+            id=f"CLM-ENUM-{suffix}",
+            policy_id=f"POL-ENUM-{suffix}",
+            customer_id=f"CUST-ENUM-{suffix}",
+            claim_stage=ClaimStage.CLAIM_REGISTERED,
+            language="en",
+        )
+    )
+    await db_session.flush()
+
+
+async def test_disposition_code_check_constraint_rejects_invalid_value_via_raw_sql(db_session):
+    """Batch 2 (Phase 1): proves the DB-level half of the same enforcement pattern spec
+    decision 5 already established for claim_stage, now for CallAttempt.disposition_code —
+    a raw SQL insert bypassing the ORM is still rejected by the CHECK constraint."""
+    await _seed_customer_policy_claim(db_session, suffix="DISP-SQL")
+
+    with pytest.raises((IntegrityError, DBAPIError)):
+        await db_session.execute(
+            text(
+                "INSERT INTO call_attempt (id, customer_id, claim_id, disposition_code) "
+                "VALUES ('CALL-ENUM-TEST', 'CUST-ENUM-DISP-SQL', 'CLM-ENUM-DISP-SQL', "
+                "'NOT_A_DISPOSITION')"
+            )
+        )
+
+
+async def test_disposition_code_orm_insert_rejects_invalid_value(db_session):
+    """ORM-level half (validate_strings=True) — raises StatementError on flush, never
+    reaching the database, mirroring test_claim_stage_orm_insert_rejects_invalid_value."""
+    from src.calls.models import CallAttempt
+
+    await _seed_customer_policy_claim(db_session, suffix="DISP-ORM")
+
+    attempt = CallAttempt(
+        id="CALL-ENUM-TEST-2",
+        customer_id="CUST-ENUM-DISP-ORM",
+        claim_id="CLM-ENUM-DISP-ORM",
+        disposition_code="NOT_A_DISPOSITION",  # type: ignore[arg-type]
+    )
+    db_session.add(attempt)
+    with pytest.raises(StatementError):
+        await db_session.flush()
+
+
+async def test_action_code_check_constraint_rejects_invalid_value_via_raw_sql(db_session):
+    await _seed_customer_policy_claim(db_session, suffix="ACT-SQL")
+
+    with pytest.raises((IntegrityError, DBAPIError)):
+        await db_session.execute(
+            text(
+                "INSERT INTO claim_action (id, claim_id, action_code, summary) "
+                "VALUES ('ACTION-ENUM-TEST', 'CLM-ENUM-ACT-SQL', 'NOT_AN_ACTION', 'x')"
+            )
+        )
+
+
+async def test_action_code_orm_insert_rejects_invalid_value(db_session):
+    from src.actions.models import ClaimAction
+
+    await _seed_customer_policy_claim(db_session, suffix="ACT-ORM")
+
+    action = ClaimAction(
+        id="ACTION-ENUM-TEST-2",
+        claim_id="CLM-ENUM-ACT-ORM",
+        action_code="NOT_AN_ACTION",  # type: ignore[arg-type]
+        summary="x",
+    )
+    db_session.add(action)
+    with pytest.raises(StatementError):
+        await db_session.flush()

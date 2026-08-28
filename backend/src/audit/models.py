@@ -25,6 +25,7 @@ from sqlalchemy.orm.mapper import Mapper
 from sqlalchemy.sql import func
 
 from src.exceptions import AuditEventImmutableError
+from src.insert_only import enforce_insert_only
 from src.models import Base
 
 
@@ -62,3 +63,28 @@ def _block_bulk_mutation(orm_execute_state: Any) -> None:
             raise AuditEventImmutableError(
                 "bulk UPDATE/DELETE against audit_event is not allowed (append-only)"
             )
+
+
+@enforce_insert_only
+class RuntimeFailureEvent(Base):
+    """Runtime/model/backend failure + recovery record — spec §10.6, task 10. Lives here,
+    not in calls/, per CLAUDE.md's audit/ package bullet ("AuditEvent, SecurityEvent,
+    AccessibilityRoutingEvent, RuntimeFailureEvent, DependencyHealthEvent"). Insert-only via
+    the shared src.insert_only guard (ORM layer) plus a hand-written REVOKE migration
+    (database layer) — see migrations/versions/*_runtime_failure_and_complaint_sla_insert_only_grants.py.
+
+    call_id is a plain indexed string, not an FK, mirroring AuditEvent.call_id above — a
+    failure can be recorded before the owning CallAttempt row is finalized.
+    """
+
+    __tablename__ = "runtime_failure_event"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    call_id: Mapped[str | None] = mapped_column(index=True, default=None)
+    component: Mapped[str]  # "LLM" | "STT" | "TTS" | "BACKEND" | "ORCHESTRATOR" | "TELEPHONY"
+    failure_type: Mapped[str]  # spec §10.6's LLM_TIMEOUT | BACKEND_5XX | ... vocabulary
+    recovery_action: Mapped[
+        str
+    ]  # WARM_TRANSFER_IF_AVAILABLE | HUMAN_CALLBACK_CREATED | SAFE_TERMINATION
+    consumed_retry_attempt: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())

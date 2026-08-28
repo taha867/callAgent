@@ -10,6 +10,13 @@ from http import HTTPStatus
 
 from pydantic import BaseModel
 
+# Domain-local exception modules (src/<domain>/exceptions.py) define their own exception
+# classes and call register_status() (below) once per HTTP-facing exception, at import
+# time, to add themselves to EXCEPTION_STATUS_MAP — the one shared registry main.py's
+# global CallAgentError handler consults. A domain exception nobody registers falls back
+# to 500 (status_for()'s default) — deliberate, so a forgotten mapping fails loudly in a
+# smoke test rather than silently returning the wrong status code.
+
 
 class CallAgentError(Exception):
     """Root of every domain exception in this codebase."""
@@ -27,6 +34,17 @@ class OutboundDisabledError(CallAgentError):
 class AuditEventImmutableError(CallAgentError):
     """Raised whenever code attempts to UPDATE, DELETE, or bulk-mutate an audit_event row.
     CLAUDE.md §2.5: audit/event tables are insert-only, enforced, not just documented."""
+
+
+class InsertOnlyTableViolationError(CallAgentError):
+    """Raised by src.insert_only's shared ORM guard for any Phase-1+ insert-only table
+    (runtime_failure_event, complaint_sla_event) that isn't audit_event itself — which
+    keeps its own, earlier, specifically-named AuditEventImmutableError above rather than
+    being refactored onto this shared mechanism (see src/insert_only.py's docstring)."""
+
+    def __init__(self, table_name: str) -> None:
+        self.table_name = table_name
+        super().__init__(f"{table_name} rows cannot be updated or deleted (append-only)")
 
 
 class UnknownToolError(CallAgentError):
@@ -77,6 +95,7 @@ class ErrorResponse(BaseModel):
 EXCEPTION_STATUS_MAP: dict[type[CallAgentError], int] = {
     OutboundDisabledError: HTTPStatus.SERVICE_UNAVAILABLE,
     AuditEventImmutableError: HTTPStatus.INTERNAL_SERVER_ERROR,
+    InsertOnlyTableViolationError: HTTPStatus.INTERNAL_SERVER_ERROR,
     UnknownToolError: HTTPStatus.BAD_REQUEST,
     IdempotencyKeyReuseError: HTTPStatus.UNPROCESSABLE_ENTITY,
     IdempotencyConflictError: HTTPStatus.CONFLICT,
@@ -89,3 +108,13 @@ def status_for(exc: CallAgentError) -> int:
         if isinstance(exc, exc_type):
             return status_code
     return HTTPStatus.INTERNAL_SERVER_ERROR
+
+
+def register_status(exc_type: type[CallAgentError], status_code: int) -> None:
+    """Lets a domain's own exceptions.py register its HTTP status mapping without
+    src/exceptions.py importing that domain (which would invert the dependency direction
+    CLAUDE.md §2.2 describes: this module must stay framework/domain-agnostic, reusable
+    from worker.py/voice_server.py with zero domain coupling). Each domain's
+    exceptions.py calls this once, at import time, for every exception its own routers can
+    raise — see src/claims/exceptions.py for the pattern."""
+    EXCEPTION_STATUS_MAP[exc_type] = status_code

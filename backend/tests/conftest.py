@@ -156,10 +156,24 @@ async def db_session_committed(db_engine, admin_engine, monkeypatch):
         async with admin_engine.begin() as conn:
             # TRUNCATE, not DELETE: matches the REVOKE'd privilege set exactly, and
             # requires the migrator role — the app role cannot do this (see the migration).
+            #
+            # Every Phase 1 table is listed explicitly, not left to CASCADE, even where an
+            # FK chain would already reach it (call_attempt/call_session/verification_attempt/
+            # otp_challenge/claim_action/callback/complaint/complaint_sla_event/
+            # customer_contact_preference/customer_auth_factor/call_job all cascade from
+            # customer/motor_claim/outbound_campaign/complaint) — documentation over implicit
+            # behavior, per .claude/specs/phase-1-backend-implementation-plan.md Batch 4.
+            # outbound_campaign, telephony_cli_configuration, business_contact_calendar,
+            # escalation, and runtime_failure_event have NO FK back to the original list and
+            # would silently accumulate rows across test runs without being named here.
             await conn.execute(
                 text(
-                    "TRUNCATE audit_event, idempotency_record, motor_claim, "
-                    "motor_policy, customer, repair_garage, claim_document, "
+                    "TRUNCATE audit_event, idempotency_record, runtime_failure_event, "
+                    "complaint_sla_event, complaint, escalation, callback, claim_action, "
+                    "otp_challenge, verification_attempt, call_session, call_attempt, "
+                    "call_job, telephony_cli_configuration, business_contact_calendar, "
+                    "outbound_campaign, customer_auth_factor, customer_contact_preference, "
+                    "motor_claim, motor_policy, customer, repair_garage, claim_document, "
                     "claim_status_event, claim_party RESTART IDENTITY CASCADE"
                 )
             )

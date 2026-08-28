@@ -61,19 +61,57 @@ class DispositionCode(StrEnum):
 
 
 class CallState(StrEnum):
-    """Placeholder. Phase 1 replaces this with spec §3's full Master Call State Machine,
-    including §3.1's global interrupt states. Names below follow spec §3's mermaid diagram
-    so Phase 1 extends this rather than replacing it wholesale."""
+    """Full Master Call State Machine, spec §3's mermaid diagram. Replaces the Phase 0
+    placeholder — see .claude/specs/phase-1-backend-spec.md §3.1."""
 
     CALL_QUEUED = "CALL_QUEUED"
     DIALING = "DIALING"
+    NO_ANSWER = "NO_ANSWER"
+    VOICEMAIL = "VOICEMAIL"
     HUMAN_ANSWERED = "HUMAN_ANSWERED"
+    FAILED = "FAILED"
     INTRODUCTION = "INTRODUCTION"
     RIGHT_PARTY_CHECK = "RIGHT_PARTY_CHECK"
+    WRONG_PARTY = "WRONG_PARTY"
+    CUSTOMER_UNAVAILABLE = "CUSTOMER_UNAVAILABLE"
     AUTHENTICATION = "AUTHENTICATION"
+    AUTH_RETRY = "AUTH_RETRY"
     AUTHENTICATED = "AUTHENTICATED"
+    AUTH_FAILED = "AUTH_FAILED"
     PURPOSE_DISCLOSURE = "PURPOSE_DISCLOSURE"
     STATUS_DELIVERY = "STATUS_DELIVERY"
     FOLLOW_UP = "FOLLOW_UP"
+    ACTION_REQUIRED = "ACTION_REQUIRED"
+    COMPLAINT = "COMPLAINT"
+    HUMAN_ESCALATION = "HUMAN_ESCALATION"
+    CALLBACK_REQUESTED = "CALLBACK_REQUESTED"
+    CALLBACK_SCHEDULE = "CALLBACK_SCHEDULE"
+    RESOLVED = "RESOLVED"
     RESOLUTION_SUMMARY = "RESOLUTION_SUMMARY"
+    TRANSFER_OR_CALLBACK = "TRANSFER_OR_CALLBACK"
     CLOSE = "CLOSE"
+
+
+# spec §3.1's global interrupts this phase's CallSessionWorkflow does not yet handle —
+# reserved signal names so Phase 2/5 extend the signal surface without renaming anything
+# Phase 1 shipped. Not driven by any Phase 1 code path.
+FUTURE_GLOBAL_INTERRUPTS: frozenset[str] = frozenset(
+    {
+        "RECORDING_CONSENT_REFUSED",
+        "COMMUNICATION_SUPPRESSION_REQUEST",
+        "ACCESSIBILITY_REQUIREMENT_DETECTED",
+        "DSAR_OR_PRIVACY_RIGHTS_REQUEST",
+        "ADVERSARIAL_INPUT_DETECTED",
+        "CUSTOMER_VULNERABILITY_INDICATED",
+        "FRAUD_SUSPECTED",
+        "LEGAL_SENSITIVITY_DETECTED",
+        "SAFETY_OR_SECURITY_ESCALATION",
+    }
+)
+
+# Bounded TTL for the distributed voice lock — spec §4.1. CallSessionWorkflow's
+# execution_timeout; if the workflow (or its worker process) hangs or crashes, Temporal
+# force-closes the execution once this elapses, freeing the customer-keyed workflow ID for
+# the next attempt with no separate lock table or reconciliation job. See
+# .claude/specs/phase-1-backend-spec.md decision 0.2.
+MAX_CALL_SESSION_SECONDS = 900

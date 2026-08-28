@@ -12,16 +12,18 @@ import random
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from src.claims.constants import ClaimStage
 from src.claims.models import (
     ClaimDocument,
-    ClaimStage,
     ClaimStatusEvent,
     MotorClaim,
     MotorPolicy,
     RepairGarage,
 )
-from src.customers.models import Customer
+from src.customers.models import Customer, CustomerAuthFactor, CustomerContactPreference
+from src.customers.service import hash_factor_value
 from src.database import get_session_factory
+from src.telephony.models import TelephonyCliConfiguration
 
 _SEED = 20260827
 
@@ -62,6 +64,29 @@ async def _upsert_customer(session, *, id_: str, full_name: str, phone: str, lan
         },
     )
     await session.execute(stmt)
+
+    # Batch 15 — every demo customer gets a contact preference + one Level-1 auth factor
+    # (a fixed birth-year value, "1990") so any harness/manual test can authenticate them.
+    pref_stmt = pg_insert(CustomerContactPreference).values(
+        id=f"PREF-{id_}", customer_id=id_, preferred_language=language
+    )
+    pref_stmt = pref_stmt.on_conflict_do_update(
+        index_elements=[CustomerContactPreference.customer_id],
+        set_={"preferred_language": pref_stmt.excluded.preferred_language},
+    )
+    await session.execute(pref_stmt)
+
+    factor_stmt = pg_insert(CustomerAuthFactor).values(
+        id=f"FACTOR-{id_}",
+        customer_id=id_,
+        factor_type="BIRTH_MONTH_YEAR",
+        factor_value_hash=hash_factor_value("1990"),
+    )
+    factor_stmt = factor_stmt.on_conflict_do_update(
+        index_elements=[CustomerAuthFactor.id],
+        set_={"factor_value_hash": factor_stmt.excluded.factor_value_hash},
+    )
+    await session.execute(factor_stmt)
 
 
 async def _upsert_garage(session, *, id_: str, name: str) -> None:
@@ -132,6 +157,18 @@ async def main() -> None:
     session_factory = get_session_factory()
 
     async with session_factory() as session, session.begin():
+        # Batch 15 — one active, trunk-authorized CLI. No BusinessContactCalendar rows:
+        # task 4's stub state (absence of a row means the normal contact window applies;
+        # real Ramadan/holiday data is a Phase 5 concern).
+        cli_stmt = pg_insert(TelephonyCliConfiguration).values(
+            cli="+971600000000", owner="ABC_INSURANCE", trunk_authorized=True, is_active=True
+        )
+        cli_stmt = cli_stmt.on_conflict_do_update(
+            index_elements=[TelephonyCliConfiguration.cli],
+            set_={"trunk_authorized": cli_stmt.excluded.trunk_authorized},
+        )
+        await session.execute(cli_stmt)
+
         garage_ids = []
         for i in range(1, 6):
             garage_id = f"GAR-DEMO-{i:03d}"

@@ -31,3 +31,21 @@ async def temporal_env():
 
     yield env
     await env.shutdown()
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def temporal_time_skipping_env():
+    """For campaigns.workflows.RetrySchedulerWorkflow / complaints.workflows.
+    ComplaintSlaMonitorWorkflow tests only — their workflow.sleep() calls span real hours/
+    days (spec §6.1's attempt windows, §18.1's SLA deadlines). `temporal_env` above is
+    explicitly NOT time-skipping (fine for Phase 0/1's timer-free workflows); reusing it for
+    a multi-hour-sleep workflow would hang or time out the test instead of completing in
+    test time.
+
+    Unlike `temporal_env`, this always starts its own local time-skipping test server —
+    time-skipping is a property of Temporal's *test* server, not something a real
+    already-running Temporal (docker-compose's `temporal` service) can be asked to do.
+    """
+    env = await WorkflowEnvironment.start_time_skipping(data_converter=pydantic_data_converter)
+    yield env
+    await env.shutdown()

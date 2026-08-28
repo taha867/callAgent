@@ -19,10 +19,16 @@ if config.config_file_name is not None:
 # phase and forgotten here would silently never autogenerate — guarded by
 # tests/unit/test_migrations_registry.py, which globs src/**/models.py (+ src/idempotency.py)
 # and asserts each is imported below.
+import src.actions.models
 import src.audit.models
+import src.calls.models
+import src.campaigns.models
 import src.claims.models
+import src.complaints.models
 import src.customers.models
 import src.idempotency
+import src.telephony.models
+import src.verification.models
 from src.config import settings
 from src.models import Base
 

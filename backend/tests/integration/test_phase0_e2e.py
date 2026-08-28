@@ -16,12 +16,12 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from temporalio import workflow
 from temporalio.worker import Worker
-from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
 with workflow.unsafe.imports_passed_through():
     from src.audit.models import AuditEvent
     from src.calls.activities import RecordAuditEventInput, record_audit_event
     from src.calls.constants import DispositionCode
+    from src.workflow_runner import SANDBOXED_WORKFLOW_RUNNER
 
 
 class Phase0SmokeInput(BaseModel):
@@ -56,11 +56,6 @@ class Phase0SmokeWorkflow:
         )
 
 
-_SANDBOX_RUNNER = SandboxedWorkflowRunner(
-    restrictions=SandboxRestrictions.default.with_passthrough_modules("pydantic", "src")
-)
-
-
 @pytest.mark.integration
 async def test_fake_call_produces_disposition_and_audit_row(
     seeded_db, db_session_committed, temporal_env
@@ -71,7 +66,7 @@ async def test_fake_call_produces_disposition_and_audit_row(
         task_queue=task_queue,
         workflows=[Phase0SmokeWorkflow],
         activities=[record_audit_event],
-        workflow_runner=_SANDBOX_RUNNER,
+        workflow_runner=SANDBOXED_WORKFLOW_RUNNER,
     ):
         result = await temporal_env.client.execute_workflow(
             Phase0SmokeWorkflow.run,
