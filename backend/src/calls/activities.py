@@ -468,6 +468,30 @@ async def schedule_callback(inp: ScheduleCallbackInput) -> dict[str, Any]:
         )
 
 
+class SendSecureLinkInput(BaseModel):
+    key: str
+    correlation_id: str
+    claim_id: str
+    customer_id: str
+    link_type: str
+    source_call_id: str | None = None
+
+
+@activity.defn(name="send_secure_link")
+async def send_secure_link(inp: SendSecureLinkInput) -> dict[str, Any]:
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        return await actions_service.send_secure_link(
+            session,
+            key=inp.key,
+            correlation_id=inp.correlation_id,
+            claim_id=inp.claim_id,
+            customer_id=inp.customer_id,
+            link_type=inp.link_type,
+            source_call_id=inp.source_call_id,
+        )
+
+
 class CreateComplaintInput(BaseModel):
     key: str
     correlation_id: str
@@ -526,4 +550,5 @@ ALL_CALLS_ACTIVITIES = [
     create_escalation,
     schedule_callback,
     create_complaint,
+    send_secure_link,
 ]

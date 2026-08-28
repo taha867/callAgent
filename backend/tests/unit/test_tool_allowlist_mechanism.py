@@ -21,16 +21,21 @@ def test_registry_disjoint_from_never_allowed_capabilities():
     assert len(NEVER_ALLOWED_CAPABILITIES) == 8
 
 
-async def test_dispatch_rejects_unregistered_name_before_reaching_stub():
+async def test_dispatch_rejects_unregistered_name_before_reaching_workflow_handle():
     with pytest.raises(UnknownToolError):
-        await dispatch_tool_call(name="change_bank_account", args={})
-
-
-async def test_dispatch_registered_name_reaches_notimplemented_stub():
-    with pytest.raises(NotImplementedError):
         await dispatch_tool_call(
-            name="get_claim_status", args={"claim_id": "CLM-1", "verification_level": "L1"}
+            name="change_bank_account", args={}, call_id="C1", workflow_handle=None
         )
+
+
+async def test_dispatch_registered_name_passes_the_allowlist_gate():
+    """The allow-list mechanism itself, not full tool behavior (that's
+    tests/unit/test_tool_dispatch_verification_authority.py, Phase 2) — get_insurer_identity
+    is the one read tool with zero I/O, so this stays a pure unit test."""
+    result = await dispatch_tool_call(
+        name="get_insurer_identity", args={}, call_id="C1", workflow_handle=None
+    )
+    assert result["insurer_name"]
 
 
 def test_static_checker_clean_against_src():

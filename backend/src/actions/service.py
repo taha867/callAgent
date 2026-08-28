@@ -52,6 +52,52 @@ async def create_action(
     )
 
 
+async def send_secure_link(
+    session: AsyncSession,
+    *,
+    key: str,
+    correlation_id: str,
+    claim_id: str,
+    customer_id: str,
+    link_type: str,
+    source_call_id: str | None = None,
+) -> dict[str, Any]:
+    """Phase 2's send_secure_link tool (voice/tools.py) — modeled as a ClaimAction, same
+    idempotent-write shape as create_action/schedule_callback. No real SMS/email vendor
+    exists at this phase (same reasoning as verification/adapters/otp_delivery's
+    "log_only" adapter) — the link itself is never generated or delivered here; this
+    persists that an approved secure link *should* be sent, for a human/later-phase
+    delivery-vendor integration to act on."""
+
+    async def _operation() -> dict[str, Any]:
+        action = ClaimAction(
+            claim_id=claim_id,
+            action_code=ActionCode.DOCUMENT_SUBMISSION_LINK_REQUEST,
+            summary=f"Secure link requested for customer {customer_id}: {link_type}",
+            source_call_id=source_call_id,
+        )
+        session.add(action)
+        await session.flush()
+        return {
+            "id": action.id,
+            "claim_id": action.claim_id,
+            "customer_id": customer_id,
+            "link_type": link_type,
+            "action_code": action.action_code.value,
+            "status": action.status,
+            "created_at": action.created_at.isoformat(),
+        }
+
+    return await idempotent(
+        session,
+        key=key,
+        correlation_id=correlation_id,
+        operation_name="send_secure_link",
+        payload={"claim_id": claim_id, "customer_id": customer_id, "link_type": link_type},
+        operation=_operation,
+    )
+
+
 async def create_escalation(
     session: AsyncSession,
     *,

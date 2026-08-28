@@ -14,6 +14,8 @@ ignore = ["E501"]
 "scripts/ci/*" = ["T201"]
 "scripts/seed_demo_data.py" = ["T201"]
 "worker.py" = ["T201"]
+# Phase 2 — genuine Arabic-language prompt/UI text (spec §2.2.3), not a Latin-lookalike typo.
+"src/voice/prompt.py" = ["RUF001"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["src", "scripts"]

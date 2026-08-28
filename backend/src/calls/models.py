@@ -76,4 +76,9 @@ class CallSession(Base):
     status_already_disclosed: Mapped[bool] = mapped_column(default=False)
     pending_action: Mapped[str | None] = mapped_column(default=None)
     last_committed_event_id: Mapped[str | None] = mapped_column(default=None)
+    # Phase 2, spec §2.2.3 — "store detected language per turn for QA." Current-language
+    # only (not full per-turn history — that's CallTranscript's job, Phase 3); written
+    # directly by voice/pipeline.py via calls/service.py::update_call_session_language(),
+    # never through a Temporal activity — see .claude/specs/phase-2-backend-spec.md §0.7.
+    language: Mapped[str] = mapped_column(default="en")
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())

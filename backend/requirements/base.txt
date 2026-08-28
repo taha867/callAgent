@@ -8,3 +8,11 @@ pydantic==2.13.4
 pydantic-settings==2.15.0
 temporalio==1.32.0
 redis==8.1.0
+
+# Phase 2 — Conversation Layer (voice/). pipecat-ai's extras pull in the demo-tier vendor
+# SDKs directly (faster-whisper, piper-tts, google-genai, groq) — do not add those as
+# separate top-level pins, and do not add a bare `aiohttp` pin either (the [webrtc] extra
+# brings what the signaling server needs).
+pipecat-ai[webrtc,whisper,piper,google,groq,runner]==1.8.1
+opentelemetry-sdk==1.44.0
+opentelemetry-exporter-otlp==1.44.0

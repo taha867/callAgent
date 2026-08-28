@@ -41,6 +41,7 @@ class DispositionContext(BaseModel):
     call_dropped: bool = False
     was_authenticated: bool = False
     backend_unavailable: bool = False
+    dtmf_fallback: bool = False  # spec §8.9, Phase 2
 
 
 class UnresolvedDispositionError(Exception):
@@ -73,6 +74,8 @@ def resolve_disposition(ctx: DispositionContext) -> DispositionCode:
         return DispositionCode.OTP_ATTEMPTS_EXCEEDED
     if ctx.backend_unavailable:
         return DispositionCode.BACKEND_SYSTEM_FAILURE
+    if ctx.dtmf_fallback:
+        return DispositionCode.DTMF_FALLBACK_ACTIVATED
 
     match ctx.final_state:
         case CallState.NO_ANSWER:
@@ -89,21 +92,29 @@ def resolve_disposition(ctx: DispositionContext) -> DispositionCode:
             return DispositionCode.AUTH_FAILED
         # Ordered most-specific-outcome-wins, NOT status-first: in the actual workflow,
         # status is always delivered before the follow-up stage that creates an action/
-        # complaint/escalation, so status_delivered=True co-occurs with those flags on
-        # every such call. Checking status_delivered first would shadow the more notable
-        # outcome and always report plain "status delivered" — wrong.
+        # complaint/escalation/callback, so status_delivered=True co-occurs with those flags
+        # on every such call. Checking status_delivered first would shadow the more notable
+        # outcome and always report plain "status delivered" — wrong. callback_requested
+        # joins this tier as of Phase 2's AI_SCHEDULE_CALLBACK branch (spec's own tool-
+        # dispatch bridge), which — unlike Phase 1's pre-status-delivery CUSTOMER_DRIVING
+        # branch — can fire after status_delivered=True is already set; it was originally a
+        # bottom-of-function-only fallback because that combination never previously arose.
         case CallState.CLOSE if ctx.human_transferred:
             return DispositionCode.SUCCESS_HUMAN_TRANSFER
         case CallState.CLOSE if ctx.complaint_created:
             return DispositionCode.SUCCESS_COMPLAINT_REGISTERED
         case CallState.CLOSE if ctx.action_created:
             return DispositionCode.SUCCESS_ACTION_CREATED
+        case CallState.CLOSE if ctx.callback_requested:
+            return DispositionCode.CALLBACK_REQUESTED
         case CallState.CLOSE if ctx.status_delivered and ctx.question_resolved:
             return DispositionCode.SUCCESS_STATUS_AND_QUERY_RESOLVED
         case CallState.CLOSE if ctx.status_delivered:
             return DispositionCode.SUCCESS_STATUS_DELIVERED
 
-    # Lowest priority: a plain callback request with none of the above in play.
+    # Lowest priority: a plain callback request on a non-CLOSE final_state (there is no
+    # such case today, but this stays as a defensive fallback, same reasoning as the rest
+    # of this function's "never silently guess" discipline).
     if ctx.callback_requested:
         return DispositionCode.CALLBACK_REQUESTED
 

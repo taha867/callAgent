@@ -68,6 +68,14 @@ _CASES: list[tuple[dict, DispositionCode]] = [
         {"final_state": CallState.DIALING, "backend_unavailable": True},
         DispositionCode.BACKEND_SYSTEM_FAILURE,
     ),
+    (
+        {"final_state": CallState.CLOSE, "dtmf_fallback": True, "callback_requested": True},
+        DispositionCode.DTMF_FALLBACK_ACTIVATED,
+    ),
+    (
+        {"final_state": CallState.CLOSE, "dtmf_fallback": True, "human_transferred": True},
+        DispositionCode.DTMF_FALLBACK_ACTIVATED,
+    ),
 ]
 
 
@@ -124,6 +132,19 @@ def test_action_created_takes_precedence_over_plain_status_delivered():
     assert resolve_disposition(ctx) == DispositionCode.SUCCESS_ACTION_CREATED
 
 
+def test_callback_requested_takes_precedence_over_plain_status_delivered():
+    """Phase 2 regression: AI_SCHEDULE_CALLBACK (calls/workflows.py) can fire after status
+    delivery, unlike Phase 1's pre-status-delivery CUSTOMER_DRIVING branch — this exact
+    combination (status_delivered=True, callback_requested=True) originally fell through to
+    SUCCESS_STATUS_DELIVERED because callback_requested was only a bottom-of-function
+    fallback never reached when the match statement's generic status_delivered case had
+    already returned."""
+    ctx = DispositionContext(
+        final_state=CallState.CLOSE, status_delivered=True, callback_requested=True
+    )
+    assert resolve_disposition(ctx) == DispositionCode.CALLBACK_REQUESTED
+
+
 def test_backend_unavailable_beats_a_fallback_action_created_alongside_it():
     """spec §14 Type E: a best-effort BACKEND_DATA_VERIFICATION_REQUEST action may be
     created as part of backend-failure recovery — that must never make the disposition
@@ -157,3 +178,14 @@ def test_human_transferred_takes_precedence_over_everything_else():
         human_transferred=True,
     )
     assert resolve_disposition(ctx) == DispositionCode.SUCCESS_HUMAN_TRANSFER
+
+
+def test_dtmf_fallback_beats_human_transferred_and_callback_requested():
+    """Phase 2, spec §8.9 — DTMF_FALLBACK_ACTIVATED is the notable operational signal
+    ("this call needed a keypad fallback because voice recognition kept failing"),
+    distinguishable in reporting from an ordinary SUCCESS_HUMAN_TRANSFER/CALLBACK_REQUESTED
+    regardless of which of the two options the customer picked."""
+    ctx = DispositionContext(
+        final_state=CallState.CLOSE, dtmf_fallback=True, human_transferred=True
+    )
+    assert resolve_disposition(ctx) == DispositionCode.DTMF_FALLBACK_ACTIVATED

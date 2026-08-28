@@ -29,15 +29,33 @@ IntentName = Literal[
     "COMPLAINT_REQUEST",
     "REQUEST_HUMAN",
     "NOTHING_ELSE",
+    # Phase 2 — AI-initiated variants bridged from voice/tools.py's tool-dispatch table
+    # (.claude/specs/phase-2-backend-spec.md §0.3/§4.2), not customer-utterance-classified.
+    "AI_SCHEDULE_CALLBACK",
+    "AI_CREATE_ACTION",
+    "AI_SEND_SECURE_LINK",
 ]
 
 
 class CustomerIntentSignal(BaseModel):
     intent: IntentName
     value: str | None = None  # AUTH_ANSWER / OTP_ANSWER's supplied answer
-    topic: str | None = None  # ASK_QUESTION's topic — "GARAGE" | "ETA" | "NEXT_STEP"
+    # ASK_QUESTION's topic ("GARAGE" | "ETA" | "NEXT_STEP"); also reused by AI_CREATE_ACTION
+    # (carries the tool-supplied action_code) and AI_SEND_SECURE_LINK (carries link_type) —
+    # both are LLM-classified single-token values, the same shape ASK_QUESTION's topic is.
+    topic: str | None = None
     document_type: str | None = None  # DISPUTE_DOCUMENT's disputed document
-    summary: str | None = None  # DISSATISFIED / COMPLAINT_REQUEST's free-text summary
+    summary: str | None = None  # DISSATISFIED / COMPLAINT_REQUEST / AI_CREATE_ACTION's reason
+    # AI_SCHEDULE_CALLBACK only — a customer-proposed window is a real fact the LLM
+    # extracted, not something the workflow should override with a fixed default (unlike
+    # the existing CUSTOMER_DRIVING branch, which has no customer-proposed window to honor).
+    callback_window_start: datetime | None = None
+    callback_window_end: datetime | None = None
+    # COMPLAINT_REQUEST only — the register_complaint tool's own classification; falls back
+    # to the workflow's existing CLAIM_DELAY/MEDIUM defaults when absent (e.g. the fake/text
+    # harness's scripted signals, which never set these), never invented by the workflow.
+    complaint_category: str | None = None
+    severity: Literal["LOW", "MEDIUM", "HIGH"] | None = None
 
 
 class CallSessionInput(BaseModel):

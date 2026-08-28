@@ -131,5 +131,42 @@ services:
       temporal:
         condition: service_healthy
 
+  # Phase 2 — the Pipecat real-time server. Starts a demo call through the `backend` HTTP
+  # API's kill-switch-gated POST /calls and signals into CallSessionWorkflow via `temporal`
+  # — but voice/tools.py's claim-specific read tools and voice/pipeline.py's own
+  # claim/customer reads (.claude/specs/phase-2-backend-spec.md's Batch 4/7 correction: the
+  # LLM never touches the DB directly, but this process's domain-service-calling code does,
+  # the same as any Temporal activity) genuinely need Postgres — hence `DATABASE_URL` and
+  # the `migrate` dependency below, matching `backend`/`worker`.
+  voice:
+    build:
+      context: ./backend
+      args:
+        REQUIREMENTS: requirements/dev.txt
+    # Pipecat's dev runner defaults to binding "localhost" — unreachable from outside the
+    # container even with the port published; --host 0.0.0.0 is required in Docker.
+    command: python voice_server.py --host 0.0.0.0
+    ports:
+      # Pipecat's dev runner listens on 7860 by default (confirmed by running it) — not a
+      # port this project chose.
+      - "${VOICE_HOST_PORT:-7860}:7860"
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://callagent_app:callagent_app@postgres:5432/callagent
+      REDIS_URL: redis://redis:6379/0
+      TEMPORAL_HOST: temporal:7233
+      BACKEND_BASE_URL: http://backend:8000
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+
 volumes:
   pgdata:

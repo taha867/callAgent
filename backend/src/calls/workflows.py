@@ -14,6 +14,7 @@ then (this phase's Goal, phases/phase-1-deterministic-core.md).
 """
 
 from datetime import datetime, timedelta
+from typing import Literal
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -21,6 +22,7 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from temporalio.workflow import ParentClosePolicy
 
+    from src.actions.constants import ActionCode
     from src.calls import activities as calls_activities
     from src.calls.constants import CallState
     from src.calls.disposition import DispositionContext, resolve_disposition
@@ -49,6 +51,11 @@ class CallSessionWorkflow:
         self._pending_signals: list[CustomerIntentSignal] = []
         self._call_dropped = False
         self._action_sequence = 0
+        # Phase 2, spec §8.9 — set by voice/dtmf.py's low-confidence-STT counter, a
+        # cross-cutting interrupt handled the same way as _call_dropped (§0.4 of
+        # .claude/specs/phase-2-backend-spec.md): every _wait_for_signal-based stage checks
+        # it, not just one.
+        self._dtmf_fallback_action: Literal["CALLBACK", "HUMAN"] | None = None
 
         # Facts accumulated as the call progresses — read once, at finalization, to build
         # the DispositionContext and the CallAttempt outcome record (spec §23).
@@ -77,27 +84,50 @@ class CallSessionWorkflow:
     async def call_dropped(self) -> None:
         self._call_dropped = True
 
+    @workflow.signal
+    async def dtmf_fallback(self, action: Literal["CALLBACK", "HUMAN"]) -> None:
+        """spec §8.9 — voice/dtmf.py fires this after MAX_CONSECUTIVE_LOW_STT_TURNS, never
+        the customer's own words (this is a deterministic system decision, unlike every
+        other signal here, which is why it is its own signal and not a CustomerIntentSignal
+        variant)."""
+        self._dtmf_fallback_action = action
+
     @workflow.query
     def current_state(self) -> str:
         return self._state
+
+    @workflow.query
+    def current_verification_level(self) -> str:
+        """spec §36 rule 1 — the one piece of call state voice/pipeline.py must never infer
+        or accept from the LLM; it always asks the workflow. See
+        .claude/specs/phase-2-backend-spec.md §0.3/§4.1."""
+        return self._verification_level or "L0"
 
     # --- helpers --------------------------------------------------------------------------
 
     async def _wait_for_signal(
         self, wait_timeout: timedelta = _SIGNAL_WAIT_TIMEOUT
     ) -> CustomerIntentSignal | None:
-        """Returns the next queued signal, or None if the call dropped or nothing arrived
-        within `wait_timeout`. A list, not a single Optional slot — two signals arriving
-        with no `await` in between (e.g. customer_utterance immediately followed by
-        call_dropped) must both be observable, never silently overwrite each other."""
+        """Returns the next queued signal, or None if the call dropped, DTMF fallback
+        activated, or nothing arrived within `wait_timeout`. A list, not a single Optional
+        slot — two signals arriving with no `await` in between (e.g. customer_utterance
+        immediately followed by call_dropped) must both be observable, never silently
+        overwrite each other. A signal already queued when DTMF fires still wins — the flag
+        is only consulted once the queue is empty, same precedence _call_dropped already
+        has."""
         try:
             await workflow.wait_condition(
-                lambda: bool(self._pending_signals) or self._call_dropped, timeout=wait_timeout
+                lambda: (
+                    bool(self._pending_signals)
+                    or self._call_dropped
+                    or self._dtmf_fallback_action is not None
+                ),
+                timeout=wait_timeout,
             )
         except TimeoutError:
             return None
         if not self._pending_signals:
-            return None  # woken by call_dropped with nothing queued
+            return None  # woken by call_dropped/dtmf_fallback with nothing queued
         return self._pending_signals.pop(0)
 
     def _next_action_key(self, call_id: str) -> str:
@@ -214,6 +244,8 @@ class CallSessionWorkflow:
             signal = await self._wait_for_signal()
 
             if signal is None:
+                if self._dtmf_fallback_action is not None:
+                    return await self._handle_dtmf_fallback(inp, attempt_id)
                 if self._call_dropped:
                     return await self._finalize(
                         inp, attempt_id, final_state=CallState.CLOSE, call_dropped=True
@@ -274,7 +306,12 @@ class CallSessionWorkflow:
             return None
 
     async def _escalate_to_human(
-        self, inp: CallSessionInput, attempt_id: str, *, reason: str
+        self,
+        inp: CallSessionInput,
+        attempt_id: str,
+        *,
+        reason: str,
+        dtmf_fallback: bool = False,
     ) -> CallSessionOutput:
         await workflow.execute_activity(
             calls_activities.create_escalation,
@@ -294,7 +331,58 @@ class CallSessionWorkflow:
         )
         self._resolution = "HUMAN_TRANSFER"
         return await self._finalize(
-            inp, attempt_id, final_state=CallState.CLOSE, human_transferred=True
+            inp,
+            attempt_id,
+            final_state=CallState.CLOSE,
+            human_transferred=True,
+            dtmf_fallback=dtmf_fallback,
+        )
+
+    async def _handle_dtmf_fallback(
+        self, inp: CallSessionInput, attempt_id: str
+    ) -> CallSessionOutput:
+        """spec §8.9 — reachable from every _wait_for_signal-based stage (§0.4 of
+        .claude/specs/phase-2-backend-spec.md), the same way _call_dropped is. Always tags
+        DTMF_FALLBACK_ACTIVATED on the disposition regardless of which of the two options
+        the customer picked — distinct operational signal from an ordinary
+        CALLBACK_REQUESTED/SUCCESS_HUMAN_TRANSFER ("this call needed a keypad fallback
+        because voice recognition kept failing"), per spec §31's dashboard analytics intent.
+        """
+        await workflow.execute_activity(
+            calls_activities.record_audit_event,
+            calls_activities.RecordAuditEventInput(
+                decision="DTMF_FALLBACK_ACTIVATED",
+                reason_code="DTMF_FALLBACK_ACTIVATED",
+                call_id=attempt_id,
+                correlation_id=inp.call_id,
+                actor="SYSTEM",
+            ),
+            start_to_close_timeout=_ACTIVITY_TIMEOUT,
+        )
+        if self._dtmf_fallback_action == "HUMAN":
+            return await self._escalate_to_human(
+                inp, attempt_id, reason="DTMF_FALLBACK", dtmf_fallback=True
+            )
+        await workflow.execute_activity(
+            calls_activities.schedule_callback,
+            calls_activities.ScheduleCallbackInput(
+                key=self._next_action_key(inp.call_id),
+                correlation_id=inp.call_id,
+                customer_id=inp.customer_id,
+                claim_id=inp.claim_id,
+                callback_window_start=_now(),
+                callback_window_end=_now() + timedelta(hours=2),
+                reason="DTMF_FALLBACK",
+            ),
+            start_to_close_timeout=_ACTIVITY_TIMEOUT,
+        )
+        self._resolution = "CALLBACK_SCHEDULED"
+        return await self._finalize(
+            inp,
+            attempt_id,
+            final_state=CallState.CLOSE,
+            dtmf_fallback=True,
+            callback_requested=True,
         )
 
     # --- stage: authentication ------------------------------------------------------------
@@ -312,6 +400,8 @@ class CallSessionWorkflow:
             signal = await self._wait_for_signal()
 
             if signal is None:
+                if self._dtmf_fallback_action is not None:
+                    return await self._handle_dtmf_fallback(inp, attempt_id)
                 if self._call_dropped:
                     return await self._finalize(
                         inp, attempt_id, final_state=CallState.CLOSE, call_dropped=True
@@ -387,6 +477,8 @@ class CallSessionWorkflow:
             signal = await self._wait_for_signal()
 
             if signal is None:
+                if self._dtmf_fallback_action is not None:
+                    return await self._handle_dtmf_fallback(inp, attempt_id)
                 if self._call_dropped:
                     return await self._finalize(
                         inp, attempt_id, final_state=CallState.CLOSE, call_dropped=True
@@ -494,6 +586,8 @@ class CallSessionWorkflow:
         signal = await self._wait_for_signal()
 
         if signal is None:
+            if self._dtmf_fallback_action is not None:
+                return await self._handle_dtmf_fallback(inp, attempt_id)
             if self._call_dropped:
                 return await self._finalize(
                     inp,
@@ -578,10 +672,10 @@ class CallSessionWorkflow:
                     correlation_id=inp.call_id,
                     claim_id=inp.claim_id,
                     source_call_id=attempt_id,
-                    complaint_category="CLAIM_DELAY",
+                    complaint_category=signal.complaint_category or "CLAIM_DELAY",
                     customer_statement_summary=signal.summary
                     or "Customer requests formal complaint",
-                    severity="MEDIUM",
+                    severity=signal.severity or "MEDIUM",
                     preferred_contact_method="PHONE",
                     now=_now(),
                 ),
@@ -613,6 +707,81 @@ class CallSessionWorkflow:
 
         if signal.intent == "REQUEST_HUMAN":
             return await self._escalate_to_human(inp, attempt_id, reason="CUSTOMER_REQUESTED_HUMAN")
+
+        # --- Phase 2: AI-initiated tool calls bridged from voice/tools.py's dispatch table
+        # (.claude/specs/phase-2-backend-spec.md §0.3/§4.2) — the LLM decided one of these
+        # side-effecting actions was appropriate; the workflow still owns executing it and
+        # deciding the resulting disposition, per CLAUDE.md's Shape B ("the workflow — not
+        # the model — decides"). `signal.topic`'s validity (a real ActionCode/link type) is
+        # voice/tools.py's responsibility at dispatch time, same trust level this file
+        # already gives every other literal action_code string below.
+
+        if signal.intent == "AI_SCHEDULE_CALLBACK":
+            await workflow.execute_activity(
+                calls_activities.schedule_callback,
+                calls_activities.ScheduleCallbackInput(
+                    key=self._next_action_key(inp.call_id),
+                    correlation_id=inp.call_id,
+                    customer_id=inp.customer_id,
+                    claim_id=inp.claim_id,
+                    callback_window_start=signal.callback_window_start or _now(),
+                    callback_window_end=signal.callback_window_end or (_now() + timedelta(hours=2)),
+                    reason=signal.summary or "AI_INITIATED_CALLBACK",
+                ),
+                start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            )
+            self._resolution = "CALLBACK_SCHEDULED"
+            return await self._finalize(
+                inp,
+                attempt_id,
+                final_state=CallState.CLOSE,
+                status_delivered=True,
+                callback_requested=True,
+            )
+
+        if signal.intent == "AI_CREATE_ACTION":
+            await workflow.execute_activity(
+                calls_activities.create_action,
+                calls_activities.CreateActionInput(
+                    key=self._next_action_key(inp.call_id),
+                    correlation_id=inp.call_id,
+                    claim_id=inp.claim_id,
+                    action_code=signal.topic or ActionCode.CLAIMS_TEAM_QUERY.value,
+                    summary=signal.summary or "AI-initiated action",
+                    source_call_id=attempt_id,
+                ),
+                start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            )
+            self._resolution = "ACTION_CREATED"
+            return await self._finalize(
+                inp,
+                attempt_id,
+                final_state=CallState.CLOSE,
+                status_delivered=True,
+                action_created=True,
+            )
+
+        if signal.intent == "AI_SEND_SECURE_LINK":
+            await workflow.execute_activity(
+                calls_activities.send_secure_link,
+                calls_activities.SendSecureLinkInput(
+                    key=self._next_action_key(inp.call_id),
+                    correlation_id=inp.call_id,
+                    claim_id=inp.claim_id,
+                    customer_id=inp.customer_id,
+                    link_type=signal.topic or "GENERAL",
+                    source_call_id=attempt_id,
+                ),
+                start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            )
+            self._resolution = "ACTION_CREATED"
+            return await self._finalize(
+                inp,
+                attempt_id,
+                final_state=CallState.CLOSE,
+                status_delivered=True,
+                action_created=True,
+            )
 
         # Unrecognized intent in this state — treat as "nothing else," matching spec §14
         # Type D's "do not hallucinate an answer" for anything genuinely out of scope.

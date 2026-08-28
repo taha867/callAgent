@@ -12,3 +12,10 @@ node_modules/
 dist/
 build/
 .claude/scheduled_tasks.lock
+
+# Piper TTS voice models (voice/adapters/tts) — auto-downloaded on first use into the
+# working directory by default; large binaries, never committed. See
+# .claude/specs/phase-2-backend-spec.md — configure PiperTTSService's download_dir to keep
+# them out of backend/ entirely in a real deployment.
+*.onnx
+*.onnx.json

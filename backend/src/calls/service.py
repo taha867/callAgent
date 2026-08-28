@@ -44,6 +44,20 @@ async def create_call_session(
     return call_session
 
 
+async def update_call_session_language(
+    session: AsyncSession, *, call_session_id: str, language: str
+) -> None:
+    """Called directly by voice/pipeline.py's own DB session (Phase 2) — never through a
+    Temporal activity, since this is per-turn conversational-QA state, not deterministic
+    call-state the workflow arbitrates. See .claude/specs/phase-2-backend-spec.md §0.7 and
+    this module's docstring's "only by activities.py" note, which this function is a
+    deliberate, documented exception to."""
+    call_session = await session.get(CallSession, call_session_id)
+    assert call_session is not None, f"no CallSession row for {call_session_id}"
+    call_session.language = language
+    await session.flush()
+
+
 async def finalize_outcome(
     session: AsyncSession,
     *,

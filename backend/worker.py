@@ -10,7 +10,6 @@ import logging
 import logging.config
 from pathlib import Path
 
-from temporalio.client import Client
 from temporalio.worker import Worker
 
 from src.calls.activities import ALL_CALLS_ACTIVITIES
@@ -20,6 +19,7 @@ from src.campaigns.workflows import RetrySchedulerWorkflow
 from src.complaints.activities import ALL_COMPLAINTS_ACTIVITIES
 from src.complaints.workflows import ComplaintSlaMonitorWorkflow
 from src.config import settings
+from src.temporal_client import get_temporal_client
 from src.workflow_runner import SANDBOXED_WORKFLOW_RUNNER
 
 logger = logging.getLogger("worker")
@@ -32,7 +32,10 @@ def _configure_logging() -> None:
 
 
 async def main() -> None:
-    client = await Client.connect(settings.TEMPORAL_HOST, namespace=settings.TEMPORAL_NAMESPACE)
+    # Shared with voice_server.py (Phase 2) — a single connection helper so every Temporal
+    # client in this codebase uses the same pydantic_data_converter, not a second
+    # independent Client.connect() that would silently diverge from it.
+    client = await get_temporal_client()
     logger.info(
         "connected to Temporal at %s (namespace=%s)",
         settings.TEMPORAL_HOST,
