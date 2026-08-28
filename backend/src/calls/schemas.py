@@ -115,3 +115,50 @@ class StartCallInput(BaseModel):
 class StartCallOutput(BaseModel):
     call_id: str
     workflow_id: str
+
+
+# --- Phase 3: transcript, summary, intent, sentiment read schemas -----------------------
+# response_model, per CLAUDE.md §2.2 — the outbound contract that strips any field these
+# schemas don't declare.
+
+
+class CallTranscriptTurnRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    turn_index: int
+    speaker: str
+    redacted_text: str
+    language: str
+    created_at: datetime
+
+
+class CallSummaryRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    call_attempt_id: str
+    summary_text: str
+    created_at: datetime
+
+
+class CustomerIntentRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    call_attempt_id: str
+    intent: str
+    topic: str | None
+    summary: str | None
+    created_at: datetime
+
+
+class SentimentEventRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    call_attempt_id: str
+    turn_index: int | None
+    sentiment: str | None
+    signal: str | None
+    confidence: float
+    created_at: datetime

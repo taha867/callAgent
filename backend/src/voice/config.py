@@ -13,11 +13,12 @@ class VoiceConfig(BaseSettings):
 
     STT_PROVIDER: str = "whisper"  # "whisper" | "groq_whisper"
     TTS_PROVIDER: str = "piper"  # "piper" (only demo-tier option this phase)
-    LLM_PROVIDER: str = "gemini"  # "gemini" | "groq_llm"
+    LLM_PROVIDER: str = "gemini"  # "gemini" | "groq_llm" | "openai"
     TELEPHONY_PROVIDER: str = "browser"  # "browser" (only demo-tier option this phase)
 
     GROQ_API_KEY: str | None = None
     GEMINI_API_KEY: str | None = None
+    OPENAI_API_KEY: str | None = None
 
     TARGET_TURN_P95_MS: int = 1500
     MODEL_TIMEOUT_MS: int = 5000

@@ -66,8 +66,17 @@ without rebuilding a Docker image each time.
 cd backend
 python3 -m venv .venv
 .venv/bin/pip install -r requirements/dev.txt
+.venv/bin/python -m spacy download en_core_web_sm   # Phase 3 — privacy/'s Presidio NER pass
 cp .env.example .env        # points at the compose services' shifted host ports — no secrets in Phase 0
 ```
+
+**Phase 3 note:** `requirements/base.txt` installs `presidio-analyzer` but deliberately not
+`presidio-anonymizer` (its pinned `cryptography<49.0.0` conflicts with `aiortc`'s — pulled in
+by `pipecat-ai[webrtc]` — `cryptography>=49.0.0` requirement; no single `cryptography`
+version satisfies both). `privacy/scrubber.py` only needs entity spans from
+`AnalyzerEngine.analyze()` and does its own `[CATEGORY_REDACTED]` replacement, so this costs
+nothing. The `en_core_web_sm` download above is a separate step from `pip install` — a Docker
+image build must run it too (see `Dockerfile`), not just this local-venv path.
 
 Make sure at least `postgres`, `redis`, and `temporal` are up first:
 
@@ -120,7 +129,7 @@ cd backend
 
 ## The governance CI gates
 
-Three static-analysis scripts enforce spec §36's rule corpus mechanically — they exit `0`
+Four static-analysis scripts enforce spec §36's rule corpus mechanically — they exit `0`
 against clean code and `1` against their fixtures under `tests/fixtures/`:
 
 ```bash
@@ -128,6 +137,7 @@ cd backend
 .venv/bin/python scripts/ci/check_tool_allowlist.py            # LLM tool calls must be in src/voice/tools.py's TOOL_REGISTRY
 .venv/bin/python scripts/ci/check_disposition_action_codes.py  # disposition/action code strings must be in the shared enums
 .venv/bin/python scripts/ci/check_no_raw_prompt_concat.py       # no raw caller text concatenated into a system/developer prompt
+.venv/bin/python scripts/ci/check_transcript_redaction.py       # Phase 3 — record_transcript_turn() must always be fed redact()'s output, never raw text
 ```
 
 All three run automatically in `.github/workflows/backend-ci.yml` on every PR.

@@ -166,6 +166,12 @@ async def db_session_committed(db_engine, admin_engine, monkeypatch):
             # outbound_campaign, telephony_cli_configuration, business_contact_calendar,
             # escalation, and runtime_failure_event have NO FK back to the original list and
             # would silently accumulate rows across test runs without being named here.
+            #
+            # Phase 3 (.claude/specs/phase-3-backend-implementation-plan.md Batch 1) adds six
+            # more: call_transcript/call_summary/customer_intent/sentiment_event/
+            # call_latency_sample all cascade from call_attempt, but pii_redaction_event has
+            # NO FK back to anything (same reasoning as escalation/runtime_failure_event
+            # above) and would silently accumulate without being named here too.
             await conn.execute(
                 text(
                     "TRUNCATE audit_event, idempotency_record, runtime_failure_event, "
@@ -174,7 +180,9 @@ async def db_session_committed(db_engine, admin_engine, monkeypatch):
                     "call_job, telephony_cli_configuration, business_contact_calendar, "
                     "outbound_campaign, customer_auth_factor, customer_contact_preference, "
                     "motor_claim, motor_policy, customer, repair_garage, claim_document, "
-                    "claim_status_event, claim_party RESTART IDENTITY CASCADE"
+                    "claim_status_event, claim_party, pii_redaction_event, call_transcript, "
+                    "call_summary, customer_intent, sentiment_event, call_latency_sample "
+                    "RESTART IDENTITY CASCADE"
                 )
             )
 

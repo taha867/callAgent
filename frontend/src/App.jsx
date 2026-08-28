@@ -1,5 +1,7 @@
 import { Routes, Route } from "react-router";
 import { Navbar } from "@/components/Navbar";
+import DashboardPage from "@/pages/DashboardPage";
+import AnalyticsPage from "@/pages/AnalyticsPage";
 import HealthPage from "@/pages/HealthPage";
 import ClaimsPage from "@/pages/ClaimsPage";
 import ClaimDetailPage from "@/pages/ClaimDetailPage";
@@ -13,7 +15,9 @@ export default function App() {
     <>
       <Navbar />
       <Routes>
-        <Route path="/" element={<HealthPage />} />
+        <Route path="/" element={<DashboardPage />} />
+        <Route path="/analytics" element={<AnalyticsPage />} />
+        <Route path="/health" element={<HealthPage />} />
         <Route path="/claims" element={<ClaimsPage />} />
         <Route path="/claims/:claimId" element={<ClaimDetailPage />} />
         <Route path="/calls" element={<CallsPage />} />

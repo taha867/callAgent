@@ -19,3 +19,16 @@ export const getCallAttempt = (callId) => unwrapResponse(fetchClient(`/calls/${c
 // phase's UI, kept as a one-line forward-compat allowance. See spec §4.1.
 export const getCallOutcome = (callId) =>
   unwrapResponse(fetchClient(`/calls/${callId}/outcome`));
+
+export const getCallTranscript = (callId) =>
+  unwrapResponse(fetchClient(`/calls/${callId}/transcript`));
+
+// Can resolve to `null` (200 OK) — the backend returns null, not 404, when
+// generate_call_summary hasn't produced a row yet. unwrapResponse passes null through
+// unchanged as long as ok is true; CallSummaryPanel handles that branch itself.
+export const getCallSummary = (callId) => unwrapResponse(fetchClient(`/calls/${callId}/summary`));
+
+export const getCallIntents = (callId) => unwrapResponse(fetchClient(`/calls/${callId}/intents`));
+
+export const getCallSentiment = (callId) =>
+  unwrapResponse(fetchClient(`/calls/${callId}/sentiment`));

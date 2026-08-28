@@ -12,6 +12,7 @@ catches and maps to BACKEND_SYSTEM_FAILURE (spec §36 rule 26: never improvise p
 
 import asyncio
 import functools
+import json
 from datetime import datetime
 from typing import Any, Literal
 
@@ -28,6 +29,7 @@ from src.complaints import service as complaints_service
 from src.complaints.config import ComplaintsConfig
 from src.config import settings
 from src.database import get_session_factory
+from src.privacy import service as privacy_service
 from src.verification import service as verification_service
 from src.verification.adapters.otp_delivery import get_otp_delivery_adapter
 from src.verification.config import VerificationConfig
@@ -81,6 +83,28 @@ async def _record_runtime_failure(
                 recovery_action=recovery_action,
             )
         )
+
+
+class RecordRuntimeFailureEventInput(BaseModel):
+    call_id: str | None = None
+    component: str  # "BACKEND" | "STT" | "LLM" | "TTS" | "TELEPHONY"
+    failure_type: str
+    recovery_action: str = "SAFE_TERMINATION"
+
+
+@activity.defn(name="record_runtime_failure_event")
+async def record_runtime_failure_event(inp: RecordRuntimeFailureEventInput) -> None:
+    """Public wrapper around _record_runtime_failure — needed from voice/pipeline.py's
+    direct (non-activity, non-workflow) call sites (spec §5.3's STT/LLM/TTS extension),
+    the same "call the activity function directly" pattern record_audit_event already uses
+    from _tag_if_adversarial. @activity.defn'd for consistency with every sibling activity
+    and in case a future workflow-side caller needs execute_activity's retry semantics."""
+    await _record_runtime_failure(
+        call_id=inp.call_id,
+        component=inp.component,
+        failure_type=inp.failure_type,
+        recovery_action=inp.recovery_action,
+    )
 
 
 def with_runtime_recovery(*, component: str, failure_type: str):
@@ -533,8 +557,235 @@ async def create_complaint(inp: CreateComplaintInput) -> dict[str, Any]:
         )
 
 
+# --- Phase 3: transcript, summary, intent, sentiment, latency, delay-flag ----------------
+
+
+class PersistTranscriptTurnInput(BaseModel):
+    call_attempt_id: str
+    turn_index: int
+    speaker: Literal["CUSTOMER", "AI"]
+    raw_text: str
+    language: str
+
+
+@activity.defn(name="persist_transcript_turn")
+async def persist_transcript_turn(inp: PersistTranscriptTurnInput) -> None:
+    """Called DIRECTLY from voice/pipeline.py (per-turn, high-frequency, not a workflow
+    signal — .claude/specs/phase-3-backend-spec.md §0.4). Redaction
+    (privacy/service.py::redact, pure) always runs before the only INSERT into
+    call_transcript in this codebase (tests/unit/test_no_unredacted_transcript_writes.py
+    enforces this mechanically).
+
+    Per .claude/plans/phase-3-backend-implementation-plan.md Correction 1: this is NOT one
+    atomic transaction. CallTranscript is committed first (a plain insert, no
+    session.begin() wrapping the whole body — idempotent()'s internal commits, called
+    inside record_redaction_events below, would conflict with an outer session.begin()
+    context manager). If any PII was detected, record_redaction_events is called
+    separately afterward, each category its own idempotent()-managed commit. A crash
+    between these two steps leaves a persisted (redacted) transcript turn with no matching
+    detection-log row — an accepted, documented risk, not a silent gap.
+    """
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        result = privacy_service.redact(inp.raw_text, language=inp.language)
+        await calls_service.record_transcript_turn(
+            session,
+            call_attempt_id=inp.call_attempt_id,
+            turn_index=inp.turn_index,
+            speaker=inp.speaker,
+            redacted_text=result.redacted_text,
+            language=inp.language,
+        )
+        await session.commit()
+
+        if result.detections:
+            await privacy_service.record_redaction_events(
+                session,
+                call_id=inp.call_attempt_id,
+                turn_index=inp.turn_index,
+                detections=result.detections,
+            )
+
+
+class RecordCustomerIntentInput(BaseModel):
+    call_attempt_id: str
+    intent: str
+    topic: str | None = None
+    summary: str | None = None
+
+
+@activity.defn(name="record_customer_intent")
+async def record_customer_intent(inp: RecordCustomerIntentInput) -> None:
+    """Called via workflow.execute_activity from calls/workflows.py — the durable record of
+    every CustomerIntentSignal the workflow consumes (spec §26)."""
+    session_factory = get_session_factory()
+    async with session_factory() as session, session.begin():
+        await calls_service.record_customer_intent(
+            session,
+            call_attempt_id=inp.call_attempt_id,
+            intent=inp.intent,
+            topic=inp.topic,
+            summary=inp.summary,
+        )
+
+
+class RecordSentimentEventInput(BaseModel):
+    call_attempt_id: str
+    turn_index: int | None = None
+    sentiment: str | None = None
+    signal: str | None = None
+    confidence: float = 1.0
+
+
+@activity.defn(name="record_sentiment_event")
+async def record_sentiment_event(inp: RecordSentimentEventInput) -> None:
+    """Two call shapes, same activity function (spec §0.4): called DIRECTLY from
+    voice/pipeline.py for per-turn rows (telemetry only, no state change), and via
+    workflow.execute_activity from calls/workflows.py for the call-start REPEATED_CONTACT
+    row and the call-end summary-level row."""
+    session_factory = get_session_factory()
+    async with session_factory() as session, session.begin():
+        await calls_service.record_sentiment_event(
+            session,
+            call_attempt_id=inp.call_attempt_id,
+            turn_index=inp.turn_index,
+            sentiment=inp.sentiment,
+            signal=inp.signal,
+            confidence=inp.confidence,
+        )
+
+
+class RecordLatencySampleInput(BaseModel):
+    call_attempt_id: str
+    turn_index: int
+    latency_ms: int
+
+
+@activity.defn(name="record_latency_sample")
+async def record_latency_sample(inp: RecordLatencySampleInput) -> None:
+    """Called DIRECTLY from voice/pipeline.py's latency tap — never blocks the audio path
+    (fired after the audio frame is already pushed downstream)."""
+    session_factory = get_session_factory()
+    async with session_factory() as session, session.begin():
+        await calls_service.record_latency_sample(
+            session,
+            call_attempt_id=inp.call_attempt_id,
+            turn_index=inp.turn_index,
+            latency_ms=inp.latency_ms,
+        )
+
+
+class GetClaimDelayFlagInput(BaseModel):
+    claim_id: str
+
+
+class GetClaimDelayFlagOutput(BaseModel):
+    delay_flag: bool
+
+
+@activity.defn(name="get_claim_delay_flag")
+async def get_claim_delay_flag(inp: GetClaimDelayFlagInput) -> GetClaimDelayFlagOutput:
+    """The DISSATISFIED-branch fix (spec §0.8/§3.7) — MotorClaim.delay_flag is a real,
+    already-computed fact (claims/models.py), not something this activity derives."""
+    from src.claims.models import MotorClaim
+
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        claim = await session.get(MotorClaim, inp.claim_id)
+        return GetClaimDelayFlagOutput(delay_flag=bool(claim.delay_flag) if claim else False)
+
+
+class CountRecentAttemptsInput(BaseModel):
+    customer_id: str
+    claim_id: str
+    since: datetime
+
+
+@activity.defn(name="count_recent_attempts")
+async def count_recent_attempts_activity(inp: CountRecentAttemptsInput) -> int:
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        return await calls_service.count_recent_attempts(
+            session, customer_id=inp.customer_id, claim_id=inp.claim_id, since=inp.since
+        )
+
+
+class GenerateCallSummaryInput(BaseModel):
+    call_attempt_id: str
+
+
+_SUMMARY_SYSTEM_PROMPT = (
+    "You write a short, factual call-closing summary (2-3 sentences) for an insurance "
+    "claim call center, for internal operational records. Use ONLY the facts given in the "
+    "JSON input — never invent, assume, or add any fact not present there, and never "
+    "speculate about what might happen next beyond what the input states. Respond with "
+    'JSON only, in this exact shape: {"summary_text": "<the summary>"}.'
+)
+
+
+@activity.defn(name="generate_call_summary")
+async def generate_call_summary(inp: GenerateCallSummaryInput) -> None:
+    """Best-effort — calls/workflows.py::_finalize() does not branch on this activity's
+    failure (spec §0.7's own framing: a missing summary must never block or delay the
+    call's own finalization). Built from CallAttempt's structured outcome fields +
+    CustomerIntent rows ONLY — never CallTranscript, so the LLM never sees free-text
+    customer speech for this task (spec §0.7). The generated text is defensively re-run
+    through privacy/service.py::redact() before being persisted, in case the LLM echoes
+    something structurally PII-shaped anyway.
+    """
+    from src.calls.models import CallAttempt
+    from src.voice.adapters.llm import get_completion_adapter
+
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        attempt = await session.get(CallAttempt, inp.call_attempt_id)
+        assert attempt is not None, (
+            f"generate_call_summary: no CallAttempt row for {inp.call_attempt_id}"
+        )
+        intents = await calls_service.get_customer_intents(session, inp.call_attempt_id)
+
+        facts = {
+            "status_delivered": attempt.status_delivered,
+            "resolution": attempt.resolution,
+            "verification_level": attempt.verification_level,
+            "disposition_code": attempt.disposition_code.value
+            if attempt.disposition_code
+            else None,
+            "customer_intents": [
+                {"intent": i.intent, "topic": i.topic, "summary": i.summary} for i in intents
+            ],
+        }
+
+        adapter = get_completion_adapter()
+        result = await adapter.complete_json(
+            system_prompt=_SUMMARY_SYSTEM_PROMPT, user_prompt=json.dumps(facts)
+        )
+        summary_text = result.get("summary_text", "")
+        redacted = privacy_service.redact(summary_text, language="en")
+
+        await calls_service.record_call_summary(
+            session, call_attempt_id=inp.call_attempt_id, summary_text=redacted.redacted_text
+        )
+        await session.commit()
+
+        # Call-end sentiment read — deliberately NOT LLM-derived: the LLM sees only
+        # structured outcome facts (never raw transcript, per this function's own
+        # docstring), so it has no real signal to read a customer's emotional tone from.
+        # "Final sentiment" (spec §31) is the last PER-TURN sentiment reading
+        # voice/sentiment.py's classifier already made during the live call — a call-level
+        # row (turn_index=None) records that reading so reporting/service.py can read it
+        # without re-deriving it from the per-turn rows on every query.
+        final_sentiment = await calls_service.get_last_turn_sentiment(session, inp.call_attempt_id)
+        if final_sentiment is not None:
+            await calls_service.record_sentiment_event(
+                session, call_attempt_id=inp.call_attempt_id, sentiment=final_sentiment
+            )
+            await session.commit()
+
+
 ALL_CALLS_ACTIVITIES = [
     record_audit_event,
+    record_runtime_failure_event,
     create_call_attempt,
     classify_answer,
     create_call_session,
@@ -551,4 +802,11 @@ ALL_CALLS_ACTIVITIES = [
     schedule_callback,
     create_complaint,
     send_secure_link,
+    persist_transcript_turn,
+    record_customer_intent,
+    record_sentiment_event,
+    record_latency_sample,
+    get_claim_delay_flag,
+    count_recent_attempts_activity,
+    generate_call_summary,
 ]

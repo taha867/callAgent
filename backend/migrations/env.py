@@ -27,6 +27,7 @@ import src.claims.models
 import src.complaints.models
 import src.customers.models
 import src.idempotency
+import src.privacy.models
 import src.telephony.models
 import src.verification.models
 from src.config import settings

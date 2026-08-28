@@ -15,6 +15,7 @@ from src.complaints.router import router as complaints_router
 from src.database import get_db
 from src.exceptions import CallAgentError, ErrorResponse, status_for
 from src.middlewares import register_middlewares
+from src.reporting.router import router as reporting_router
 
 _logging_ini = Path(__file__).resolve().parent.parent / "logging.ini"
 if _logging_ini.exists():
@@ -28,6 +29,7 @@ app.include_router(claims_router, prefix="/claims", tags=["claims"])
 app.include_router(actions_router, prefix="/claims", tags=["actions"])
 app.include_router(calls_router, prefix="/calls", tags=["calls"])
 app.include_router(complaints_router, prefix="/complaints", tags=["complaints"])
+app.include_router(reporting_router, prefix="/reporting", tags=["reporting"])
 
 
 @app.exception_handler(CallAgentError)

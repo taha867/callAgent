@@ -74,6 +74,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements/dev.txt
 
+      - name: Download spaCy model (Phase 3 — privacy/'s Presidio NER pass)
+        # Not a pip package — requirements/dev.txt installing presidio-analyzer/spacy alone
+        # is not enough; without this the Presidio branch of privacy/scrubber.py's
+        # find_presidio_matches() fails to load en_core_web_sm on first use. See
+        # backend/README.md's Phase 3 note.
+        run: python -m spacy download en_core_web_sm
+
       - name: Provision two-role DB setup
         # GitHub Actions service containers can't mount /docker-entrypoint-initdb.d — this
         # step is docker-compose's postgres-service init-script mount, applied explicitly.
@@ -111,6 +118,9 @@ jobs:
 
       - name: Gate — no raw prompt concatenation
         run: python scripts/ci/check_no_raw_prompt_concat.py
+
+      - name: Gate — no unredacted transcript writes
+        run: python scripts/ci/check_transcript_redaction.py
 
       - name: Tests
         run: pytest tests -v --cov=src --cov-report=term-missing

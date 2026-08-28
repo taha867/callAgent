@@ -4,6 +4,8 @@ import { Menu, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 const LINKS = [
+  { to: "/", label: "Dashboard" },
+  { to: "/analytics", label: "Analytics" },
   { to: "/claims", label: "Claims" },
   { to: "/calls", label: "Calls" },
   { to: "/complaints", label: "Complaints" },

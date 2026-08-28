@@ -115,3 +115,11 @@ FUTURE_GLOBAL_INTERRUPTS: frozenset[str] = frozenset(
 # the next attempt with no separate lock table or reconciliation job. See
 # .claude/specs/phase-1-backend-spec.md decision 0.2.
 MAX_CALL_SESSION_SECONDS = 900
+
+# Phase 3, spec §18/§31's REPEATED_CONTACT signal — a deterministic prior-attempt-count
+# check (calls/service.py::count_recent_attempts), not an LLM inference. Two plain
+# constants, not a new BaseSettings subclass — CLAUDE.md §2.8's "a domain that genuinely
+# needs its own settings" bar isn't met by two values. See
+# .claude/plans/phase-3-backend-implementation-plan.md Batch 8.
+REPEATED_CONTACT_WINDOW_DAYS = 30
+REPEATED_CONTACT_THRESHOLD = 3

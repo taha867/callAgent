@@ -16,3 +16,16 @@ redis==8.1.0
 pipecat-ai[webrtc,whisper,piper,google,groq,runner]==1.8.1
 opentelemetry-sdk==1.44.0
 opentelemetry-exporter-otlp==1.44.0
+
+# Phase 3 — Operational Intelligence (privacy/). presidio-analyzer only, deliberately NOT
+# presidio-anonymizer: presidio-anonymizer==2.2.364 hard-pins cryptography<49.0.0, which is
+# incompatible with aiortc's (pipecat-ai[webrtc]) transitive pyopenssl>=26 requiring
+# cryptography>=49.0.0 — no version of cryptography satisfies both, confirmed via `pip
+# check` when both were installed together. privacy/scrubber.py uses
+# AnalyzerEngine.analyze() for entity SPANS only and does its own [CATEGORY_REDACTED]
+# string replacement (src/privacy/service.py) — it never needed AnonymizerEngine's
+# encrypt/hash operators, so dropping presidio-anonymizer costs nothing.
+presidio-analyzer==2.2.364
+spacy==3.8.16
+# en_core_web_sm is a separate, non-pip model download — see backend/README:
+#   .venv/bin/python -m spacy download en_core_web_sm

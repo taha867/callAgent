@@ -13,6 +13,7 @@ will call into once STT/LLM/TTS exist, so none of this file's decision logic nee
 then (this phase's Goal, phases/phase-1-deterministic-core.md).
 """
 
+import contextlib
 from datetime import datetime, timedelta
 from typing import Literal
 
@@ -24,7 +25,11 @@ with workflow.unsafe.imports_passed_through():
 
     from src.actions.constants import ActionCode
     from src.calls import activities as calls_activities
-    from src.calls.constants import CallState
+    from src.calls.constants import (
+        REPEATED_CONTACT_THRESHOLD,
+        REPEATED_CONTACT_WINDOW_DAYS,
+        CallState,
+    )
     from src.calls.disposition import DispositionContext, resolve_disposition
     from src.calls.schemas import CallSessionInput, CallSessionOutput, CustomerIntentSignal
     from src.complaints.workflows import ComplaintSlaMonitorInput, ComplaintSlaMonitorWorkflow
@@ -34,6 +39,13 @@ _ACTIVITY_TIMEOUT = timedelta(seconds=10)
 _BACKEND_ACTIVITY_TIMEOUT = timedelta(seconds=5)
 _BACKEND_RETRY_POLICY = RetryPolicy(maximum_attempts=3)
 _SIGNAL_WAIT_TIMEOUT = timedelta(minutes=5)
+# generate_call_summary is best-effort and its own caller (_finalize) already swallows any
+# exception — retrying a call that failed (a missing/invalid API key is not a transient
+# condition retrying would fix; an LLM provider outage is rare enough not to be worth
+# delaying every single call's finalization for) has no upside and a real cost: it would
+# delay finalization by however long the retry backoff takes, on every call, for no
+# customer-facing benefit. One attempt only.
+_NO_RETRY_POLICY = RetryPolicy(maximum_attempts=1)
 
 
 def _now():
@@ -65,6 +77,12 @@ class CallSessionWorkflow:
         self._verification_level: str | None = None
         self._status_delivered_key: str | None = None
         self._resolution: str | None = None
+        # Phase 3 — set at the top of run(), consumed by _finalize()'s duration_seconds
+        # computation. FinalizeOutcomeInput.duration_seconds already existed end-to-end
+        # (calls/activities.py, calls/service.py) since Phase 1; only this workflow-side
+        # timestamp and its use at the _finalize() call site were missing. See
+        # .claude/plans/phase-3-backend-implementation-plan.md §5.4.
+        self._attempted_at: datetime | None = None
 
     # --- signals / queries --------------------------------------------------------------
 
@@ -138,6 +156,24 @@ class CallSessionWorkflow:
         self._action_sequence += 1
         return f"{call_id}-ACTION-{self._action_sequence}"
 
+    async def _record_intent(self, attempt_id: str, signal: CustomerIntentSignal) -> None:
+        """Phase 3 — the durable CustomerIntent record of every CustomerIntentSignal this
+        workflow ever dequeues (spec §26), called from every _wait_for_signal() call site
+        that proceeds into intent branching, before that branching happens. Deliberately
+        forwards only intent/topic/summary, never signal.value — AUTH_ANSWER/OTP_ANSWER
+        carry a raw factor/OTP value there, and spec §36 rule 18 (never log OTP/PIN) must
+        hold here too, not just in verification/service.py."""
+        await workflow.execute_activity(
+            calls_activities.record_customer_intent,
+            calls_activities.RecordCustomerIntentInput(
+                call_attempt_id=attempt_id,
+                intent=signal.intent,
+                topic=signal.topic,
+                summary=signal.summary,
+            ),
+            start_to_close_timeout=_ACTIVITY_TIMEOUT,
+        )
+
     async def _finalize(
         self, inp: CallSessionInput, attempt_id: str, *, final_state: CallState, **flags
     ) -> CallSessionOutput:
@@ -146,6 +182,11 @@ class CallSessionWorkflow:
         )
         disposition = resolve_disposition(ctx)
 
+        duration_seconds = (
+            int((_now() - self._attempted_at).total_seconds())
+            if self._attempted_at is not None
+            else None
+        )
         await workflow.execute_activity(
             calls_activities.finalize_outcome,
             calls_activities.FinalizeOutcomeInput(
@@ -158,6 +199,7 @@ class CallSessionWorkflow:
                 verification_level=self._verification_level,
                 status_delivered=self._status_delivered_key,
                 resolution=self._resolution or disposition.value,
+                duration_seconds=duration_seconds,
             ),
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
         )
@@ -173,12 +215,25 @@ class CallSessionWorkflow:
             ),
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
         )
+        # Phase 3, spec §0.7 — best-effort, deliberately no branch on failure: a missing
+        # CallSummary is a dashboard gap, never a reason to block or delay this workflow's
+        # own finalization/disposition. Runs last, after the outcome/audit rows this
+        # activity itself reads (CallAttempt.status_delivered/resolution/disposition_code)
+        # already exist.
+        with contextlib.suppress(Exception):
+            await workflow.execute_activity(
+                calls_activities.generate_call_summary,
+                calls_activities.GenerateCallSummaryInput(call_attempt_id=attempt_id),
+                start_to_close_timeout=_BACKEND_ACTIVITY_TIMEOUT,
+                retry_policy=_NO_RETRY_POLICY,
+            )
         return CallSessionOutput(call_id=inp.call_id, disposition_code=disposition.value)
 
     # --- run ------------------------------------------------------------------------------
 
     @workflow.run
     async def run(self, inp: CallSessionInput) -> CallSessionOutput:
+        self._attempted_at = _now()
         attempt_id = await workflow.execute_activity(
             calls_activities.create_call_attempt,
             calls_activities.CreateCallAttemptInput(
@@ -187,11 +242,33 @@ class CallSessionWorkflow:
                 claim_id=inp.claim_id,
                 call_job_id=inp.call_job_id,
                 attempt_number=inp.attempt_number,
-                attempted_at=_now(),
+                attempted_at=self._attempted_at,
             ),
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
         )
         self._state = CallState.DIALING
+
+        # Phase 3, spec §18/§31 — REPEATED_CONTACT: a deterministic prior-attempt count,
+        # never an LLM inference. Checked once, at call start, before any branch — a
+        # customer's Nth attempt in the window is a fact about the customer/claim pair,
+        # not something that depends on how this particular attempt turns out.
+        recent_attempts = await workflow.execute_activity(
+            calls_activities.count_recent_attempts_activity,
+            calls_activities.CountRecentAttemptsInput(
+                customer_id=inp.customer_id,
+                claim_id=inp.claim_id,
+                since=self._attempted_at - timedelta(days=REPEATED_CONTACT_WINDOW_DAYS),
+            ),
+            start_to_close_timeout=_ACTIVITY_TIMEOUT,
+        )
+        if recent_attempts >= REPEATED_CONTACT_THRESHOLD:
+            await workflow.execute_activity(
+                calls_activities.record_sentiment_event,
+                calls_activities.RecordSentimentEventInput(
+                    call_attempt_id=attempt_id, signal="REPEATED_CONTACT", confidence=1.0
+                ),
+                start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            )
 
         answer_result = await workflow.execute_activity(
             calls_activities.classify_answer,
@@ -254,6 +331,8 @@ class CallSessionWorkflow:
                 return await self._finalize(
                     inp, attempt_id, final_state=CallState.CUSTOMER_UNAVAILABLE
                 )
+
+            await self._record_intent(attempt_id, signal)
 
             if signal.intent == "WRONG_PARTY":
                 self._right_party = False
@@ -408,6 +487,8 @@ class CallSessionWorkflow:
                     )
                 return await self._finalize(inp, attempt_id, final_state=CallState.AUTH_FAILED)
 
+            await self._record_intent(attempt_id, signal)
+
             if signal.intent == "REQUEST_HUMAN":
                 return await self._escalate_to_human(
                     inp, attempt_id, reason="CUSTOMER_REQUESTED_HUMAN"
@@ -484,6 +565,8 @@ class CallSessionWorkflow:
                         inp, attempt_id, final_state=CallState.CLOSE, call_dropped=True
                     )
                 return await self._finalize(inp, attempt_id, final_state=CallState.AUTH_FAILED)
+
+            await self._record_intent(attempt_id, signal)
 
             if signal.intent == "REQUEST_HUMAN":
                 return await self._escalate_to_human(
@@ -601,6 +684,8 @@ class CallSessionWorkflow:
                 inp, attempt_id, final_state=CallState.CLOSE, status_delivered=True
             )
 
+        await self._record_intent(attempt_id, signal)
+
         if signal.intent == "NOTHING_ELSE":
             self._resolution = "FULLY_RESOLVED_BY_AI"
             return await self._finalize(
@@ -643,13 +728,29 @@ class CallSessionWorkflow:
             )
 
         if signal.intent == "DISSATISFIED":
+            # Phase 3 fix (spec §0.8/§18): gate CLAIM_DELAY_ESCALATION on the claim's own
+            # already-computed delay_flag — spec §18's own worked example is conditional
+            # ("If the system confirms a delay..."), and this branch previously escalated
+            # unconditionally on nothing but the customer's words. Never a claim's real
+            # delay_flag not being confirmed: falls back to CLAIMS_TEAM_QUERY, an existing
+            # spec §25 action code with no other creator, same "never let a customer/LLM
+            # assumption substitute for the engine checking real state" rule CLAUDE.md §4
+            # states elsewhere in this codebase.
+            claim_delay = await workflow.execute_activity(
+                calls_activities.get_claim_delay_flag,
+                calls_activities.GetClaimDelayFlagInput(claim_id=inp.claim_id),
+                start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            )
+            action_code = (
+                "CLAIM_DELAY_ESCALATION" if claim_delay.delay_flag else "CLAIMS_TEAM_QUERY"
+            )
             await workflow.execute_activity(
                 calls_activities.create_action,
                 calls_activities.CreateActionInput(
                     key=self._next_action_key(inp.call_id),
                     correlation_id=inp.call_id,
                     claim_id=inp.claim_id,
-                    action_code="CLAIM_DELAY_ESCALATION",
+                    action_code=action_code,
                     summary=signal.summary or "Customer dissatisfied with delay",
                     source_call_id=attempt_id,
                 ),
