@@ -50,6 +50,30 @@ Tear down:
 docker compose down -v      # -v also drops the postgres volume (fresh DB next time)
 ```
 
+### Rebuilding after pulling new backend code
+
+`docker compose up` alone does **not** rebuild images just because files on disk changed —
+it only builds an image if one doesn't exist yet, otherwise it reuses whatever was last
+built. Whenever you pull/switch to a commit that adds or changes backend files (new
+migrations especially), rebuild explicitly:
+
+```bash
+docker compose up -d --wait --build
+```
+
+This matters most for the `migrate` service: unlike `backend` (which bind-mounts
+`./backend:/app` and so always runs the current on-disk code), `migrate` has no live mount
+and only ever sees whatever was baked into its image at the last build. If the Postgres
+volume (which persists across `up`/`down`) has already been migrated to a revision that a
+stale `migrate` image doesn't know about — e.g. by another session's local `alembic upgrade
+head`, or by rebuilding `backend`/`worker` without also rebuilding `migrate` — you'll see:
+
+```text
+FAILED: Can't locate revision identified by '<revision>'
+```
+
+Fix: `docker compose build migrate backend worker voice && docker compose up -d --wait`.
+
 **Note on first build:** the very first `docker compose build`/`up` has to `pip install`
 everything inside the image, which can be slow depending on your network path into Docker's
 build context (this took ~30 min once in a throttled sandbox environment; on a normal

@@ -39,3 +39,19 @@ export const CALL_ANSWER_RESULTS = ["HUMAN_ANSWERED", "NO_ANSWER", "VOICEMAIL", 
 // (ComplaintCreate.severity / .preferred_contact_method). See spec decision 0.8.
 export const COMPLAINT_SEVERITIES = ["LOW", "MEDIUM", "HIGH"];
 export const COMPLAINT_CONTACT_METHODS = ["PHONE", "EMAIL", "SMS"];
+
+// Mirrors backend/src/qa/constants.py::DemoJourneyId verbatim.
+export const DEMO_JOURNEY_IDS = [
+  "DEMO_1_SUCCESSFUL_STATUS_UPDATE", "DEMO_2_CUSTOMER_BUSY", "DEMO_3_WRONG_PERSON",
+  "DEMO_4_AUTHENTICATION_FAILURE", "DEMO_5_DOCUMENT_STATUS_DISPUTE",
+  "DEMO_6_DELAYED_CLAIM_DISSATISFIED_CUSTOMER", "DEMO_7_MULTI_TURN_QUESTIONS",
+  "DEMO_8_HUMAN_COMPLAINT_ESCALATION", "DEMO_9_NO_ANSWER",
+];
+
+// Mirrors backend/src/qa/constants.py::DefectStatus verbatim.
+export const DEFECT_STATUSES = ["OPEN", "FIX_APPLIED", "COMPILED", "WONT_FIX"];
+
+// Mirrors backend/src/qa/constants.py::CompiledArtifactType verbatim.
+export const COMPILED_ARTIFACT_TYPES = [
+  "REGRESSION_TEST", "GUARD_PHRASE_RULE", "TOOL_ALLOWLIST_RULE", "NON_NEGOTIABLE_RULE",
+];

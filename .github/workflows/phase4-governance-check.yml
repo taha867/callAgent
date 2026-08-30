@@ -1,0 +1,33 @@
+name: phase4-governance-check
+
+# Deliberately workflow_dispatch ONLY — no push/pull_request trigger. This gate reads real
+# defect-log history from the persistent hardening/staging database, not a fresh per-PR
+# ephemeral one (which has no such history and would always trivially pass). Run this
+# manually before signing off Phase 4's exit criteria, or whenever a hardening session
+# wants to confirm no defect has silently gone uncompiled after its second sighting.
+# See .claude/specs/phase-4-backend-spec.md §6.2 and
+# scripts/ci/check_defect_log_two_strike.py.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  two-strike-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -r requirements/dev.txt
+
+      - name: Run the two-strike governance gate
+        working-directory: backend
+        env:
+          DATABASE_URL: ${{ secrets.PHASE4_STAGING_DATABASE_URL }}
+          GITHUB_ACTIONS: "true"
+        run: python scripts/ci/check_defect_log_two_strike.py

@@ -9,6 +9,7 @@ const LINKS = [
   { to: "/claims", label: "Claims" },
   { to: "/calls", label: "Calls" },
   { to: "/complaints", label: "Complaints" },
+  { to: "/qa", label: "Governance" },
 ];
 
 // First real navigation — Phase 0 deferred this because there was only one route. Mobile-

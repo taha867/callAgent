@@ -9,6 +9,7 @@ import CallsPage from "@/pages/CallsPage";
 import CallDetailPage from "@/pages/CallDetailPage";
 import ComplaintsPage from "@/pages/ComplaintsPage";
 import ComplaintDetailPage from "@/pages/ComplaintDetailPage";
+import QaGovernancePage from "@/pages/QaGovernancePage";
 
 export default function App() {
   return (
@@ -24,6 +25,7 @@ export default function App() {
         <Route path="/calls/:callId" element={<CallDetailPage />} />
         <Route path="/complaints" element={<ComplaintsPage />} />
         <Route path="/complaints/:complaintId" element={<ComplaintDetailPage />} />
+        <Route path="/qa" element={<QaGovernancePage />} />
       </Routes>
     </>
   );

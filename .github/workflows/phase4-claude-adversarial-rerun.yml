@@ -1,0 +1,85 @@
+name: phase4-claude-adversarial-rerun
+
+# Deliberately workflow_dispatch ONLY, and a no-op unless ANTHROPIC_API_KEY is configured —
+# IMPLEMENTATION_PLAN.md's stack table flags that this project's $0-cost demo LLM tier
+# (Gemini/Groq free tier) is measurably weaker than Claude at resisting jailbreak/
+# system-override phrasing, and that Phase 4/5 hardening should be re-run against Claude
+# before any real deployment decision. That re-run costs real money per call and must never
+# silently become part of the default per-commit CI job.
+#
+# No src/voice/adapters/llm/claude.py adapter exists yet (voice_settings.LLM_PROVIDER's
+# current valid values are "gemini" | "groq_llm" | "openai" — confirmed via read-only
+# exploration) — building that adapter is out of scope for this plan. The "Check Claude LLM
+# adapter exists" step below makes this job self-skipping rather than failing until that
+# adapter is built.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  claude-adversarial-rerun:
+    runs-on: ubuntu-latest
+    if: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: callagent
+          POSTGRES_USER: callagent
+          POSTGRES_PASSWORD: callagent
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U callagent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+      temporal:
+        image: temporalio/auto-setup:1.29.7
+        environment:
+          DB: postgres12
+          DB_PORT: 5432
+          POSTGRES_USER: callagent
+          POSTGRES_PWD: callagent
+          POSTGRES_SEEDS: localhost
+        ports: ["7233:7233"]
+    env:
+      DATABASE_URL: postgresql+asyncpg://callagent_app:callagent_app@localhost:5432/callagent
+      MIGRATION_DATABASE_URL: postgresql+asyncpg://callagent_migrator:callagent_migrator@localhost:5432/callagent
+      REDIS_URL: redis://localhost:6379/0
+      TEMPORAL_HOST: localhost:7233
+      TEMPORAL_NAMESPACE: default
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -r requirements/dev.txt
+
+      - name: Check Claude LLM adapter exists
+        id: check_adapter
+        working-directory: backend
+        run: |
+          python -c "import src.voice.adapters.llm.claude" 2>/dev/null \
+            && echo "adapter_exists=true" >> "$GITHUB_OUTPUT" \
+            || echo "adapter_exists=false" >> "$GITHUB_OUTPUT"
+
+      - name: Report blocked status
+        if: steps.check_adapter.outputs.adapter_exists == 'false'
+        run: echo "::warning::Blocked — no src/voice/adapters/llm/claude.py exists yet. This job is a no-op until that adapter is built (out of scope for the Phase 4 plan)."
+
+      - name: Run adversarial re-run against Claude
+        if: steps.check_adapter.outputs.adapter_exists == 'true'
+        working-directory: backend
+        env:
+          LLM_PROVIDER: claude
+        run: |
+          pytest tests/scripted_conversations/adversarial/test_jailbreak_system_override.py \
+                 tests/scripted_conversations/adversarial/test_prompt_extraction_attempt.py -v

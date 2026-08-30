@@ -22,6 +22,22 @@ from src.config import settings
 from src.temporal_client import get_temporal_client
 from src.workflow_runner import SANDBOXED_WORKFLOW_RUNNER
 
+# Explicit model import so every activity-reachable FK target is registered in SQLAlchemy's
+# mapper registry for this process. src.campaigns.models (CallJob/OutboundCampaign) is never
+# otherwise imported anywhere in this file's import graph — campaigns/activities.py and
+# campaigns/workflows.py only touch src.campaigns.service/schemas/constants, never .models
+# directly (service.py itself is the only real consumer, and workflows.py deliberately stays
+# sandbox-safe/model-free per CLAUDE.md §2.6). Without this, the FIRST ORM flush of a
+# CallAttempt row (call_attempt.call_job_id -> call_job.id) in this process raises
+# sqlalchemy.exc.NoReferencedTableError — confirmed live: it silently wedged
+# call-session-CUST-DEMO-009 into an infinite create_call_attempt retry loop for 16+ hours,
+# permanently holding that customer's distributed voice lock (spec §4.1) and blocking every
+# subsequent /calls attempt for it with WorkflowAlreadyStartedError. migrations/env.py
+# already carries the identical "import every domain's models module" discipline for this
+# exact reason; worker.py needs the same for campaigns specifically since it's the one
+# domain whose models module isn't already pulled in transitively by this file's imports.
+import src.campaigns.models  # noqa: F401
+
 logger = logging.getLogger("worker")
 
 

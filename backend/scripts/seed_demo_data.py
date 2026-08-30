@@ -9,6 +9,7 @@ hardcodes both IDs.
 
 import asyncio
 import random
+from datetime import date
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -23,7 +24,26 @@ from src.claims.models import (
 from src.customers.models import Customer, CustomerAuthFactor, CustomerContactPreference
 from src.customers.service import hash_factor_value
 from src.database import get_session_factory
-from src.telephony.models import TelephonyCliConfiguration
+from src.telephony.models import BusinessContactCalendar, TelephonyCliConfiguration
+
+# Phase 4 — synthetic demo-only calendar rows so the contact-window mechanism (task 4's
+# stub, telephony/service.py::is_within_contact_window) is actually exercisable by
+# tests/scripted_conversations/adversarial/test_contact_window_blackout.py. NOT real UAE
+# Ramadan/holiday dates — see phases/phase-5-security-compliance.md for that data feed.
+_DEMO_CALENDAR_ROWS = [
+    {
+        "id": "DEMO-CAL-2026-09-05",
+        "calendar_date": date(2026, 9, 5),
+        "calendar_type": "RAMADAN",
+        "contact_allowed": False,
+    },
+    {
+        "id": "DEMO-CAL-2026-09-06",
+        "calendar_date": date(2026, 9, 6),
+        "calendar_type": "BLACKOUT",
+        "contact_allowed": False,
+    },
+]
 
 _SEED = 20260827
 
@@ -168,6 +188,18 @@ async def main() -> None:
             set_={"trunk_authorized": cli_stmt.excluded.trunk_authorized},
         )
         await session.execute(cli_stmt)
+
+        # Phase 4 — Batch 15b: the two synthetic BusinessContactCalendar rows above.
+        for row in _DEMO_CALENDAR_ROWS:
+            cal_stmt = pg_insert(BusinessContactCalendar).values(**row)
+            cal_stmt = cal_stmt.on_conflict_do_update(
+                index_elements=[BusinessContactCalendar.id],
+                set_={
+                    "calendar_type": cal_stmt.excluded.calendar_type,
+                    "contact_allowed": cal_stmt.excluded.contact_allowed,
+                },
+            )
+            await session.execute(cal_stmt)
 
         garage_ids = []
         for i in range(1, 6):

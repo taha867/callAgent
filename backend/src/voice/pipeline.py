@@ -37,6 +37,8 @@ from pipecat.services.llm_service import FunctionCallParams, LLMService
 from pipecat.services.stt_service import STTService
 from pipecat.services.tts_service import TTSService
 from pipecat.transports.base_transport import BaseTransport
+from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 from temporalio.client import Client, WorkflowHandle
 
@@ -496,7 +498,20 @@ async def run_call_pipeline(
     tts = get_tts_service(language=ctx.current_language)
     llm = get_llm_service()
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
-        llm_context, user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer())
+        llm_context,
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=SileroVADAnalyzer(),
+            # Pipecat's own default stop strategy (TurnAnalyzerUserTurnStopStrategy +
+            # LocalSmartTurnAnalyzerV3, a local ML end-of-utterance classifier) has no
+            # fallback timeout when it predicts EndOfTurnState.INCOMPLETE: the turn then
+            # waits forever unless the user starts speaking again — confirmed live, a
+            # single short utterance (e.g. "hi") got stuck with no bot response at all.
+            # This app was built around plain VAD-stop-based turn-taking (spec §2.2's
+            # diagram has no ML turn-completion step); SpeechTimeoutUserTurnStopStrategy
+            # restores that — VAD stop + a fixed settle window + a received transcript,
+            # never an indefinite ML-confidence wait.
+            user_turn_strategies=UserTurnStrategies(stop=[SpeechTimeoutUserTurnStopStrategy()]),
+        ),
     )
     tap = _ConversationTapProcessor(ctx, llm_context)
     assistant_tap = _AssistantTranscriptTap(ctx)

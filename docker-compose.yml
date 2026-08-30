@@ -158,6 +158,15 @@ services:
       REDIS_URL: redis://redis:6379/0
       TEMPORAL_HOST: temporal:7233
       BACKEND_BASE_URL: http://backend:8000
+    volumes:
+      # Whisper (via Hugging Face Hub) and Piper voice models are ~100-150MB/model,
+      # downloaded on first use into these directories (src/voice/adapters/tts/__init__.py
+      # pins the Piper one explicitly; the HF one is faster-whisper's own default). Without
+      # a named volume here, every `docker compose build`/container recreate loses them and
+      # re-downloads from scratch on the next connection — this is what made the very first
+      # connection after a rebuild take minutes instead of seconds.
+      - hf_cache:/home/app/.cache/huggingface
+      - piper_cache:/home/app/.cache/piper
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -170,3 +179,5 @@ services:
 
 volumes:
   pgdata:
+  hf_cache:
+  piper_cache:

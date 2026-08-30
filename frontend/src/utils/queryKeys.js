@@ -32,3 +32,14 @@ export const reportingKeys = {
   customerExperience: (since, until) => [...reportingKeys.all, "customer-experience", since, until],
   escalationAnalytics: (since, until) => [...reportingKeys.all, "escalation-analytics", since, until],
 };
+
+// qa/ is the first genuinely paginated/filtered list in this codebase — defectList's key
+// includes the whole params object deliberately, same "a param change is a cache miss"
+// reasoning reportingKeys already established for since/until.
+export const qaKeys = {
+  all: ["qa"],
+  defectList: (params) => [...qaKeys.all, "defects", "list", params],
+  defectDetail: (id) => [...qaKeys.all, "defects", id],
+  journeyRuns: (demoJourneyId) => [...qaKeys.all, "journey-runs", demoJourneyId ?? "all"],
+  governanceSummary: () => [...qaKeys.all, "governance-summary"],
+};
